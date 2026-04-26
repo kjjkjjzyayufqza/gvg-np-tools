@@ -1,0 +1,226 @@
+{
+  "file": "E:\\del\\gundamv_All\\test\\Y_DATA.BIN",
+  "magic": "AFS\u0000",
+  "file_size": 124581888,
+  "file_count": 22,
+  "table_offset": 8,
+  "name_table": {
+    "offset": 124579840,
+    "size": 1056,
+    "entry_size": 48
+  },
+  "entries": [
+    {
+      "index": 0,
+      "offset": 2048,
+      "size": 31488000,
+      "name": "op01.sfd",
+      "magic16_hex": "50534d46303031350000080001e07000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 1,
+      "offset": 31490048,
+      "size": 31444992,
+      "name": "op02.sfd",
+      "magic16_hex": "50534d46303031350000080001dfc800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 2,
+      "offset": 62935040,
+      "size": 1820672,
+      "name": "oplogo.sfd",
+      "magic16_hex": "50534d463030313500000800001bc000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 3,
+      "offset": 64755712,
+      "size": 3160064,
+      "name": "dm00.sfd",
+      "magic16_hex": "50534d46303031350000080000303000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 4,
+      "offset": 67915776,
+      "size": 3168256,
+      "name": "dm01.sfd",
+      "magic16_hex": "50534d46303031350000080000305000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 5,
+      "offset": 71084032,
+      "size": 3110912,
+      "name": "dm02.sfd",
+      "magic16_hex": "50534d463030313500000800002f7000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 6,
+      "offset": 74194944,
+      "size": 3047424,
+      "name": "dm03.sfd",
+      "magic16_hex": "50534d463030313500000800002e7800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 7,
+      "offset": 77242368,
+      "size": 3151872,
+      "name": "dm04.sfd",
+      "magic16_hex": "50534d46303031350000080000301000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 8,
+      "offset": 80394240,
+      "size": 3178496,
+      "name": "dm05.sfd",
+      "magic16_hex": "50534d46303031350000080000307800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 9,
+      "offset": 83572736,
+      "size": 3153920,
+      "name": "dm06.sfd",
+      "magic16_hex": "50534d46303031350000080000301800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 10,
+      "offset": 86726656,
+      "size": 3166208,
+      "name": "dm07.sfd",
+      "magic16_hex": "50534d46303031350000080000304800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 11,
+      "offset": 89892864,
+      "size": 3178496,
+      "name": "dm08.sfd",
+      "magic16_hex": "50534d46303031350000080000307800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 12,
+      "offset": 93071360,
+      "size": 3239936,
+      "name": "dm09.sfd",
+      "magic16_hex": "50534d46303031350000080000316800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 13,
+      "offset": 96311296,
+      "size": 3053568,
+      "name": "dm10.sfd",
+      "magic16_hex": "50534d463030313500000800002e9000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 14,
+      "offset": 99364864,
+      "size": 3112960,
+      "name": "dm11.sfd",
+      "magic16_hex": "50534d463030313500000800002f7800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 15,
+      "offset": 102477824,
+      "size": 3207168,
+      "name": "dm12.sfd",
+      "magic16_hex": "50534d4630303135000008000030e800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 16,
+      "offset": 105684992,
+      "size": 3252224,
+      "name": "dm13.sfd",
+      "magic16_hex": "50534d46303031350000080000319800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 17,
+      "offset": 108937216,
+      "size": 3184640,
+      "name": "dm14.sfd",
+      "magic16_hex": "50534d46303031350000080000309000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 18,
+      "offset": 112121856,
+      "size": 3084288,
+      "name": "dm15.sfd",
+      "magic16_hex": "50534d463030313500000800002f0800",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 19,
+      "offset": 115206144,
+      "size": 3135488,
+      "name": "dm16.sfd",
+      "magic16_hex": "50534d463030313500000800002fd000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 20,
+      "offset": 118341632,
+      "size": 3123200,
+      "name": "dm17.sfd",
+      "magic16_hex": "50534d463030313500000800002fa000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    },
+    {
+      "index": 21,
+      "offset": 121464832,
+      "size": 3115008,
+      "name": "dm18.sfd",
+      "magic16_hex": "50534d463030313500000800002f8000",
+      "magic4_ascii": "PSMF",
+      "ext": "sfd"
+    }
+  ],
+  "summary": {
+    "by_ext_top": [
+      {
+        "key": "sfd",
+        "count": 22
+      }
+    ],
+    "by_magic4_top": [
+      {
+        "key": "PSMF",
+        "count": 22
+      }
+    ]
+  }
+}

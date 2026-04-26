@@ -1,0 +1,960 @@
+{
+  "results": [
+    {
+      "name": "pl00.pzz",
+      "size": 877072,
+      "key_hex": "0xa268052a",
+      "fc": 12,
+      "zlib_streams": 11,
+      "total_decompressed": 1232980,
+      "model_hits": [
+        {
+          "index": 1,
+          "offset": 69384,
+          "compressed_size": 49398,
+          "decompressed_size": 66256,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream001_off010f08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 3,
+          "offset": 122248,
+          "compressed_size": 2909,
+          "decompressed_size": 17616,
+          "head_hex": "4d49472e30302e31505350000000000002000000c04400001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream003_off01dd88.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 5,
+          "offset": 125448,
+          "compressed_size": 541,
+          "decompressed_size": 2320,
+          "head_hex": "4d49472e30302e31505350000000000002000000000900001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream005_off01ea08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        }
+      ],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 67276,
+          "decompressed_size": 165872,
+          "head_hex": "504d463235000000200000000000000026068140cba1b2412606814000000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 69384,
+          "compressed_size": 49398,
+          "decompressed_size": 66256,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream001_off010f08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "offset": 118792,
+          "compressed_size": 3440,
+          "decompressed_size": 11136,
+          "head_hex": "504d463209000000200000000000000060bd0e4184a3114260bd0e4100000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream002_off01d008.bin"
+        },
+        {
+          "index": 3,
+          "offset": 122248,
+          "compressed_size": 2909,
+          "decompressed_size": 17616,
+          "head_hex": "4d49472e30302e31505350000000000002000000c04400001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream003_off01dd88.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 4,
+          "offset": 125192,
+          "compressed_size": 142,
+          "decompressed_size": 384,
+          "head_hex": "504d4632010000002000000000000000eaef9c420000f0400000803f00000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream004_off01e908.bin"
+        },
+        {
+          "index": 5,
+          "offset": 125448,
+          "compressed_size": 541,
+          "decompressed_size": 2320,
+          "head_hex": "4d49472e30302e31505350000000000002000000000900001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream005_off01ea08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 6,
+          "offset": 126088,
+          "compressed_size": 645977,
+          "decompressed_size": 931464,
+          "head_hex": "5341442080360e005d00000008020000450000007c0300000000000000000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream006_off01ec88.bin"
+        },
+        {
+          "index": 7,
+          "offset": 772104,
+          "compressed_size": 2807,
+          "decompressed_size": 19552,
+          "head_hex": "a00d0000a00f0000a00d0000a00d000080250000a03a0000e04b0000a00d0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream007_off0bc808.bin"
+        },
+        {
+          "index": 8,
+          "offset": 774920,
+          "compressed_size": 1346,
+          "decompressed_size": 12800,
+          "head_hex": "000b000060150000000b0000000b000080210000402a000080310000000b0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream008_off0bd308.bin"
+        },
+        {
+          "index": 9,
+          "offset": 776328,
+          "compressed_size": 292,
+          "decompressed_size": 572,
+          "head_hex": "ec5138be0000000000000000ec51b8bd9a9999c08fc2f53c295c8f3e0000403f",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream009_off0bd888.bin"
+        },
+        {
+          "index": 10,
+          "offset": 776712,
+          "compressed_size": 614,
+          "decompressed_size": 5008,
+          "head_hex": "1f003d008000090050030200f00302009004020030050200d005020070060200",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00\\stream010_off0bda08.bin"
+        }
+      ]
+    },
+    {
+      "name": "pl00l.pzz",
+      "size": 861968,
+      "key_hex": "0x1cd56d68",
+      "fc": 12,
+      "zlib_streams": 11,
+      "total_decompressed": 1181828,
+      "model_hits": [
+        {
+          "index": 1,
+          "offset": 53000,
+          "compressed_size": 50243,
+          "decompressed_size": 66256,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream001_off00cf08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 3,
+          "offset": 106120,
+          "compressed_size": 3854,
+          "decompressed_size": 17616,
+          "head_hex": "4d49472e30302e31505350000000000002000000c04400001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream003_off019e88.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 5,
+          "offset": 110344,
+          "compressed_size": 541,
+          "decompressed_size": 2320,
+          "head_hex": "4d49472e30302e31505350000000000002000000000900001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream005_off01af08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        }
+      ],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 50884,
+          "decompressed_size": 116480,
+          "head_hex": "504d463235000000200000000000000026068140cba1b2412606814000000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 53000,
+          "compressed_size": 50243,
+          "decompressed_size": 66256,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream001_off00cf08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "offset": 103304,
+          "compressed_size": 2765,
+          "decompressed_size": 9376,
+          "head_hex": "504d463209000000200000000000000060bd0e4184a3114260bd0e4100000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream002_off019388.bin"
+        },
+        {
+          "index": 3,
+          "offset": 106120,
+          "compressed_size": 3854,
+          "decompressed_size": 17616,
+          "head_hex": "4d49472e30302e31505350000000000002000000c04400001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream003_off019e88.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 4,
+          "offset": 110088,
+          "compressed_size": 142,
+          "decompressed_size": 384,
+          "head_hex": "504d4632010000002000000000000000eaef9c420000f0400000803f00000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream004_off01ae08.bin"
+        },
+        {
+          "index": 5,
+          "offset": 110344,
+          "compressed_size": 541,
+          "decompressed_size": 2320,
+          "head_hex": "4d49472e30302e31505350000000000002000000000900001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream005_off01af08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 6,
+          "offset": 110984,
+          "compressed_size": 645977,
+          "decompressed_size": 931464,
+          "head_hex": "5341442080360e005d00000008020000450000007c0300000000000000000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream006_off01b188.bin"
+        },
+        {
+          "index": 7,
+          "offset": 757000,
+          "compressed_size": 2807,
+          "decompressed_size": 19552,
+          "head_hex": "a00d0000a00f0000a00d0000a00d000080250000a03a0000e04b0000a00d0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream007_off0b8d08.bin"
+        },
+        {
+          "index": 8,
+          "offset": 759816,
+          "compressed_size": 1346,
+          "decompressed_size": 12800,
+          "head_hex": "000b000060150000000b0000000b000080210000402a000080310000000b0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream008_off0b9808.bin"
+        },
+        {
+          "index": 9,
+          "offset": 761224,
+          "compressed_size": 292,
+          "decompressed_size": 572,
+          "head_hex": "ec5138be0000000000000000ec51b8bd9a9999c08fc2f53c295c8f3e0000403f",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream009_off0b9d88.bin"
+        },
+        {
+          "index": 10,
+          "offset": 761608,
+          "compressed_size": 614,
+          "decompressed_size": 5008,
+          "head_hex": "1f003d008000090050030200f00302009004020030050200d005020070060200",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl00l\\stream010_off0b9f08.bin"
+        }
+      ]
+    },
+    {
+      "name": "pl10.pzz",
+      "size": 870672,
+      "key_hex": "0x59aaee75",
+      "fc": 12,
+      "zlib_streams": 11,
+      "total_decompressed": 1343792,
+      "model_hits": [
+        {
+          "index": 1,
+          "offset": 68616,
+          "compressed_size": 39647,
+          "decompressed_size": 66256,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream001_off010c08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 3,
+          "offset": 153608,
+          "compressed_size": 10256,
+          "decompressed_size": 17616,
+          "head_hex": "4d49472e30302e31505350000000000002000000c04400001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream003_off025808.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 5,
+          "offset": 164232,
+          "compressed_size": 650,
+          "decompressed_size": 2320,
+          "head_hex": "4d49472e30302e31505350000000000002000000000900001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream005_off028188.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        }
+      ],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 66451,
+          "decompressed_size": 148720,
+          "head_hex": "504d46324400000020000000000000000f470541a3d9a840b5fdc34000000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 68616,
+          "compressed_size": 39647,
+          "decompressed_size": 66256,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream001_off010c08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "offset": 108296,
+          "compressed_size": 45279,
+          "decompressed_size": 115568,
+          "head_hex": "504d46324b0000002000000000000000e1d8d842db26dc422a16bf4200000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream002_off01a708.bin"
+        },
+        {
+          "index": 3,
+          "offset": 153608,
+          "compressed_size": 10256,
+          "decompressed_size": 17616,
+          "head_hex": "4d49472e30302e31505350000000000002000000c04400001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream003_off025808.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 4,
+          "offset": 163976,
+          "compressed_size": 142,
+          "decompressed_size": 384,
+          "head_hex": "504d4632010000002000000000000000eaef9c420000f0400000803f00000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream004_off028088.bin"
+        },
+        {
+          "index": 5,
+          "offset": 164232,
+          "compressed_size": 650,
+          "decompressed_size": 2320,
+          "head_hex": "4d49472e30302e31505350000000000002000000000900001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream005_off028188.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 6,
+          "offset": 165000,
+          "compressed_size": 574101,
+          "decompressed_size": 944776,
+          "head_hex": "53414420806a0e005d00000008020000330000007c0300000000000000000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream006_off028488.bin"
+        },
+        {
+          "index": 7,
+          "offset": 739208,
+          "compressed_size": 3690,
+          "decompressed_size": 23488,
+          "head_hex": "4017000080180000c0190000401700004017000080470000205b000040170000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream007_off0b4788.bin"
+        },
+        {
+          "index": 8,
+          "offset": 742920,
+          "compressed_size": 1669,
+          "decompressed_size": 13344,
+          "head_hex": "200d0000a0160000a0190000200d0000200d0000202b000040330000200d0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream008_off0b5608.bin"
+        },
+        {
+          "index": 9,
+          "offset": 744712,
+          "compressed_size": 347,
+          "decompressed_size": 1144,
+          "head_hex": "295c0fbe00000000000000005c8fc2bd9a9999c08fc2f53c295c8f3e0000403f",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream009_off0b5d08.bin"
+        },
+        {
+          "index": 10,
+          "offset": 745096,
+          "compressed_size": 1029,
+          "decompressed_size": 10176,
+          "head_hex": "3f007c0000010900d0030000d003080050060100a006020040070200e0070200",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl10\\stream010_off0b5e88.bin"
+        }
+      ]
+    },
+    {
+      "name": "pl41.pzz",
+      "size": 849936,
+      "key_hex": "0x1cd56d68",
+      "fc": 12,
+      "zlib_streams": 11,
+      "total_decompressed": 1346712,
+      "model_hits": [
+        {
+          "index": 1,
+          "offset": 60168,
+          "compressed_size": 50594,
+          "decompressed_size": 66256,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream001_off00eb08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 3,
+          "offset": 160136,
+          "compressed_size": 6676,
+          "decompressed_size": 17616,
+          "head_hex": "4d49472e30302e31505350000000000002000000c04400001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream003_off027188.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 5,
+          "offset": 167176,
+          "compressed_size": 689,
+          "decompressed_size": 2320,
+          "head_hex": "4d49472e30302e31505350000000000002000000000900001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream005_off028d08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        }
+      ],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 58053,
+          "decompressed_size": 149632,
+          "head_hex": "504d46323f0000002000000000000000164a404034066c415d7b664100000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 60168,
+          "compressed_size": 50594,
+          "decompressed_size": 66256,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream001_off00eb08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "offset": 110856,
+          "compressed_size": 49175,
+          "decompressed_size": 132864,
+          "head_hex": "504d4632520000002000000000000000aa39eb42e56c8144aa39eb4200000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream002_off01b108.bin"
+        },
+        {
+          "index": 3,
+          "offset": 160136,
+          "compressed_size": 6676,
+          "decompressed_size": 17616,
+          "head_hex": "4d49472e30302e31505350000000000002000000c04400001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream003_off027188.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 4,
+          "offset": 166920,
+          "compressed_size": 142,
+          "decompressed_size": 384,
+          "head_hex": "504d4632010000002000000000000000eaef9c420000f0400000803f00000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream004_off028c08.bin"
+        },
+        {
+          "index": 5,
+          "offset": 167176,
+          "compressed_size": 689,
+          "decompressed_size": 2320,
+          "head_hex": "4d49472e30302e31505350000000000002000000000900001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream005_off028d08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 6,
+          "offset": 167944,
+          "compressed_size": 538130,
+          "decompressed_size": 940048,
+          "head_hex": "5341442008580e005d00000008020000450000007c0300000000000000000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream006_off029008.bin"
+        },
+        {
+          "index": 7,
+          "offset": 706184,
+          "compressed_size": 2534,
+          "decompressed_size": 16352,
+          "head_hex": "200e0000200e0000400f0000400f0000a0280000203a0000a03f0000200e0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream007_off0ac688.bin"
+        },
+        {
+          "index": 8,
+          "offset": 708744,
+          "compressed_size": 1444,
+          "decompressed_size": 11872,
+          "head_hex": "600b000000170000600b0000001700002023000020280000002e0000600b0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream008_off0ad088.bin"
+        },
+        {
+          "index": 9,
+          "offset": 710280,
+          "compressed_size": 427,
+          "decompressed_size": 1144,
+          "head_hex": "ec5138be0000000000000000ec51b8bd9a9999c08fc2f53c295c8f3e0000403f",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream009_off0ad688.bin"
+        },
+        {
+          "index": 10,
+          "offset": 710792,
+          "compressed_size": 981,
+          "decompressed_size": 8224,
+          "head_hex": "23006500900009006003030050040200f004010040050200e005020080060200",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\pl41\\stream010_off0ad888.bin"
+        }
+      ]
+    },
+    {
+      "name": "dm00.pzz",
+      "size": 544912,
+      "key_hex": "0xc14c220f",
+      "fc": 3,
+      "zlib_streams": 3,
+      "total_decompressed": 752384,
+      "model_hits": [],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 539068,
+          "decompressed_size": 712512,
+          "head_hex": "5341442038df0a00180000000802000018000000680200000000000000000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\dm00\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 541192,
+          "compressed_size": 1630,
+          "decompressed_size": 21760,
+          "head_hex": "20490000e0490000a04a0000204b000020490000e0490000a04a0000204b0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\dm00\\stream001_off084208.bin"
+        },
+        {
+          "index": 2,
+          "offset": 542856,
+          "compressed_size": 2017,
+          "decompressed_size": 18112,
+          "head_hex": "803b0000803b0000003d0000803e0000403c0000403c0000c03d0000203f0000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\dm00\\stream002_off084888.bin"
+        }
+      ]
+    },
+    {
+      "name": "basic.pzz",
+      "size": 198288,
+      "key_hex": "0x1a1fe53b",
+      "fc": 7,
+      "zlib_streams": 7,
+      "total_decompressed": 582928,
+      "model_hits": [
+        {
+          "index": 1,
+          "offset": 4488,
+          "compressed_size": 22787,
+          "decompressed_size": 66768,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00401001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream001_off001188.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 3,
+          "offset": 29320,
+          "compressed_size": 4048,
+          "decompressed_size": 8464,
+          "head_hex": "4d49472e30302e31505350000000000002000000002100001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream003_off007288.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 5,
+          "offset": 166536,
+          "compressed_size": 28685,
+          "decompressed_size": 70368,
+          "head_hex": "4d49472e30302e31505350000000000002000000d01201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream005_off028a88.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "source": "concatenated",
+          "magics": {
+            "GIM_texture": [
+              12448
+            ]
+          },
+          "size": 582928,
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\_all_concat.bin"
+        }
+      ],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 2315,
+          "decompressed_size": 12448,
+          "head_hex": "504d46321c000000200000000000000085cb41430a97e3420000803f00000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 4488,
+          "compressed_size": 22787,
+          "decompressed_size": 66768,
+          "head_hex": "4d49472e30302e31505350000000000002000000c00401001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream001_off001188.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "offset": 27400,
+          "compressed_size": 1821,
+          "decompressed_size": 9760,
+          "head_hex": "504d463218000000200000000000000000007143000009430000803f00000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream002_off006b08.bin"
+        },
+        {
+          "index": 3,
+          "offset": 29320,
+          "compressed_size": 4048,
+          "decompressed_size": 8464,
+          "head_hex": "4d49472e30302e31505350000000000002000000002100001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream003_off007288.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 4,
+          "offset": 33416,
+          "compressed_size": 133077,
+          "decompressed_size": 389472,
+          "head_hex": "504d4632a40100002000000000000000513d924300208044f1e3454300000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream004_off008288.bin"
+        },
+        {
+          "index": 5,
+          "offset": 166536,
+          "compressed_size": 28685,
+          "decompressed_size": 70368,
+          "head_hex": "4d49472e30302e31505350000000000002000000d01201001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream005_off028a88.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "index": 6,
+          "offset": 195336,
+          "compressed_size": 2871,
+          "decompressed_size": 25648,
+          "head_hex": "d300360150030100a0030100f00301004004010090040100e004020080050100",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\basic\\stream006_off02fb08.bin"
+        }
+      ]
+    },
+    {
+      "name": "logo.pzz",
+      "size": 32016,
+      "key_hex": "0x59aaee75",
+      "fc": 2,
+      "zlib_streams": 2,
+      "total_decompressed": 136336,
+      "model_hits": [
+        {
+          "index": 1,
+          "offset": 2824,
+          "compressed_size": 29114,
+          "decompressed_size": 133504,
+          "head_hex": "4d49472e30302e31505350000000000002000000700902001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\logo\\stream001_off000b08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "source": "concatenated",
+          "magics": {
+            "GIM_texture": [
+              2832
+            ]
+          },
+          "size": 136336,
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\logo\\_all_concat.bin"
+        }
+      ],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 756,
+          "decompressed_size": 2832,
+          "head_hex": "504d463207000000200000000000000000007a43000012430000803f00000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\logo\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 2824,
+          "compressed_size": 29114,
+          "decompressed_size": 133504,
+          "head_hex": "4d49472e30302e31505350000000000002000000700902001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\logo\\stream001_off000b08.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "title.pzz",
+      "size": 78224,
+      "error": "no_key"
+    },
+    {
+      "name": "menu.pzz",
+      "size": 58512,
+      "key_hex": "0xc14c220f",
+      "fc": 2,
+      "zlib_streams": 2,
+      "total_decompressed": 149712,
+      "model_hits": [
+        {
+          "index": 1,
+          "offset": 9352,
+          "compressed_size": 49122,
+          "decompressed_size": 108800,
+          "head_hex": "4d49472e30302e31505350000000000002000000f0a801001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\menu\\stream001_off002488.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "source": "concatenated",
+          "magics": {
+            "GIM_texture": [
+              40912
+            ]
+          },
+          "size": 149712,
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\menu\\_all_concat.bin"
+        }
+      ],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 7262,
+          "decompressed_size": 40912,
+          "head_hex": "504d46325300000020000000000000000e5f64443a4d59440000484300000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\menu\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 9352,
+          "compressed_size": 49122,
+          "decompressed_size": 108800,
+          "head_hex": "4d49472e30302e31505350000000000002000000f0a801001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\menu\\stream001_off002488.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "gallery.pzz",
+      "size": 76176,
+      "key_hex": "0x4ab70b80",
+      "fc": 2,
+      "zlib_streams": 2,
+      "total_decompressed": 306016,
+      "model_hits": [
+        {
+          "index": 1,
+          "offset": 9480,
+          "compressed_size": 66678,
+          "decompressed_size": 256496,
+          "head_hex": "4d49472e30302e31505350000000000002000000e0e903001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\gallery\\stream001_off002508.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        },
+        {
+          "source": "concatenated",
+          "magics": {
+            "GIM_texture": [
+              49520
+            ]
+          },
+          "size": 306016,
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\gallery\\_all_concat.bin"
+        }
+      ],
+      "blocks": [
+        {
+          "index": 0,
+          "offset": 2056,
+          "compressed_size": 7303,
+          "decompressed_size": 49520,
+          "head_hex": "504d463268000000200000000000000000008243000020430000484300000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\gallery\\stream000_off000808.bin"
+        },
+        {
+          "index": 1,
+          "offset": 9480,
+          "compressed_size": 66678,
+          "decompressed_size": 256496,
+          "head_hex": "4d49472e30302e31505350000000000002000000e0e903001000000010000000",
+          "file": "E:\\del\\gundamv_All\\test\\pzz_harvest_out\\gallery\\stream001_off002508.gim",
+          "magics": {
+            "GIM_texture": [
+              0
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

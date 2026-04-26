@@ -1,0 +1,165 @@
+{
+  "dir": "E:\\del\\gundamv_All\\test\\data_bin_inventory",
+  "items": [
+    {
+      "file": "E:\\del\\gundamv_All\\test\\W_DATA.BIN",
+      "file_count": 480,
+      "file_size": 21434368,
+      "magic": "AFS\u0000",
+      "ext_top10": [
+        {
+          "key": "bin",
+          "count": 480
+        }
+      ],
+      "magic4_top10": [
+        {
+          "key": "MWo3",
+          "count": 480
+        }
+      ]
+    },
+    {
+      "file": "E:\\del\\gundamv_All\\test\\X_DATA.BIN",
+      "file_count": 14623,
+      "file_size": 624109568,
+      "magic": "AFS\u0000",
+      "ext_top10": [
+        {
+          "key": "adx",
+          "count": 14623
+        }
+      ],
+      "magic4_top10": [
+        {
+          "key": "�\u0000\u0000$",
+          "count": 14579
+        },
+        {
+          "key": "�\u0000\u0001�",
+          "count": 5
+        },
+        {
+          "key": "�\u0000\u0007�",
+          "count": 5
+        },
+        {
+          "key": "�\u0000\u0004�",
+          "count": 5
+        },
+        {
+          "key": "�\u0000\u0003�",
+          "count": 4
+        },
+        {
+          "key": "�\u0000\u0007H",
+          "count": 2
+        },
+        {
+          "key": "�\u0000\u0006<",
+          "count": 2
+        },
+        {
+          "key": "�\u0000\u0005�",
+          "count": 2
+        },
+        {
+          "key": "�\u0000\u0005\u001c",
+          "count": 1
+        },
+        {
+          "key": "�\u0000\u0002�",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "E:\\del\\gundamv_All\\test\\Y_DATA.BIN",
+      "file_count": 22,
+      "file_size": 124581888,
+      "magic": "AFS\u0000",
+      "ext_top10": [
+        {
+          "key": "sfd",
+          "count": 22
+        }
+      ],
+      "magic4_top10": [
+        {
+          "key": "PSMF",
+          "count": 22
+        }
+      ]
+    },
+    {
+      "file": "E:\\del\\gundamv_All\\test\\Z_DATA.BIN",
+      "file_count": 2651,
+      "file_size": 277342208,
+      "magic": "AFS\u0000",
+      "ext_top10": [
+        {
+          "key": "pzz",
+          "count": 2125
+        },
+        {
+          "key": "bin",
+          "count": 467
+        },
+        {
+          "key": "bgm",
+          "count": 56
+        },
+        {
+          "key": "snd",
+          "count": 2
+        },
+        {
+          "key": "gmf",
+          "count": 1
+        }
+      ],
+      "magic4_top10": [
+        {
+          "key": "��>�",
+          "count": 340
+        },
+        {
+          "key": "�\u000b�J",
+          "count": 302
+        },
+        {
+          "key": "9�\u001f\u001a",
+          "count": 252
+        },
+        {
+          "key": "(\u0005h�",
+          "count": 194
+        },
+        {
+          "key": "jm�\u001c",
+          "count": 164
+        },
+        {
+          "key": "w��Y",
+          "count": 142
+        },
+        {
+          "key": "\r\"L�",
+          "count": 127
+        },
+        {
+          "key": "+\u0005h�",
+          "count": 62
+        },
+        {
+          "key": "U��Y",
+          "count": 56
+        },
+        {
+          "key": "\n\u0005h�",
+          "count": 54
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+*.BIN
+
+_ppsspp_src/
+
+ppsspp_dump/
+pzz_harvest_out/
+pzz_mesh_recon_out/
+test/
+
+__pycache__/
+*.pyc
