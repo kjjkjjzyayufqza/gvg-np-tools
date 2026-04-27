@@ -9,3 +9,13 @@ test/
 
 __pycache__/
 *.pyc
+
+converted_out/
+data_bin_inventory/
+pipeline_out/
+pipeline_out_rs/
+
+debug/
+target/
+**/*.rs.bk
+*.pdb
