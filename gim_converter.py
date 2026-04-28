@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import struct
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 try:
     from PIL import Image
@@ -37,6 +37,111 @@ def unswizzle(data: bytes, width: int, height: int, bpp: int) -> bytearray:
                     out[dst_off:dst_off + block_w] = data[src_off:src_off + block_w]
 
     return out
+
+
+def swizzle(data: bytes, width: int, height: int, bpp: int) -> bytearray:
+    row_bytes = width * bpp // 8
+    out = bytearray(len(data))
+    block_w = 16
+    block_h = 8
+    blocks_per_row = row_bytes // block_w
+    if blocks_per_row == 0 or len(data) < row_bytes * height:
+        return bytearray(data)
+    for by in range(0, height, block_h):
+        for bx in range(blocks_per_row):
+            block_idx = (by // block_h) * blocks_per_row + bx
+            src_base = block_idx * block_w * block_h
+            for iy in range(block_h):
+                dst_row = by + iy
+                if dst_row >= height:
+                    break
+                src_off = src_base + iy * block_w
+                dst_off = dst_row * row_bytes + bx * block_w
+                if src_off + block_w <= len(out) and dst_off + block_w <= len(data):
+                    out[src_off:src_off + block_w] = data[dst_off:dst_off + block_w]
+    return out
+
+
+def gim_fill_black(gim_data: bytes) -> Optional[bytes]:
+    if len(gim_data) < 16:
+        return None
+    is_le = gim_data[:4] == b'MIG.'
+    is_be = gim_data[:4] == b'.GIM'
+    if not is_le and not is_be:
+        return None
+    b = bytearray(gim_data)
+    blocks = find_blocks(b, 0x10, len(b))
+    image_info: Optional[dict] = None
+    palette_info: Optional[dict] = None
+
+    def search_blks(blks: list) -> None:
+        nonlocal image_info, palette_info
+        for x in blks:
+            if x['id'] == 0x05 and palette_info is None:
+                palette_info = parse_image_block_data(
+                    b, x['offset'], x['data_offset']
+                )
+            if x['id'] == 0x04 and image_info is None:
+                image_info = parse_image_block_data(
+                    b, x['offset'], x['data_offset']
+                )
+            if x.get('children'):
+                search_blks(x['children'])
+
+    search_blks(blocks)
+    if not image_info:
+        return None
+    fmt = image_info['format']
+    if fmt in (0x04, 0x05) and palette_info is not None:
+        pal_off = int(palette_info['pixels_offset'])
+        pal_fmt = int(palette_info['format'])
+        p_w = int(palette_info['width'])
+        p_h = int(palette_info['height'])
+        n = p_w * p_h
+        if pal_fmt == 0x03:
+            for i in range(n):
+                off = pal_off + i * 4
+                b[off] = 0
+                b[off + 1] = 0
+                b[off + 2] = 0
+        elif pal_fmt == 0x00:
+            for i in range(n):
+                c = ru16(b, pal_off + i * 2)
+                struct.pack_into("<H", b, pal_off + i * 2, c & 0x8000)
+        elif pal_fmt == 0x01:
+            for i in range(n):
+                c = ru16(b, pal_off + i * 2)
+                struct.pack_into("<H", b, pal_off + i * 2, c & 0x8000)
+        elif pal_fmt == 0x02:
+            for i in range(n):
+                c = ru16(b, pal_off + i * 2)
+                struct.pack_into("<H", b, pal_off + i * 2, c & 0xF000)
+        else:
+            return None
+        return bytes(b)
+    if fmt in PIXEL_DECODERS:
+        w = int(image_info['width'])
+        h = int(image_info['height'])
+        pix_off = int(image_info['pixels_offset'])
+        swi = int(image_info['pixel_order']) == 1
+        _, bppp = PIXEL_DECODERS[fmt]
+        if fmt == 0x00:
+            chunk = b"\x00\x00" * (w * h)
+        elif fmt == 0x01:
+            chunk = struct.pack("<H", 0x8000) * (w * h)
+        elif fmt == 0x02:
+            chunk = struct.pack("<H", 0xF000) * (w * h)
+        else:
+            chunk = b"\x00\x00\x00\xFF" * (w * h)
+        if swi:
+            out_raw = swizzle(chunk, w, h, bppp)
+        else:
+            out_raw = bytearray(chunk)
+        if pix_off + len(out_raw) > len(b):
+            return None
+        b[pix_off : pix_off + len(out_raw)] = out_raw
+        return bytes(b)
+    return None
 
 
 def decode_rgba5650(data: bytes, width: int, height: int) -> List[Tuple[int,int,int,int]]:

@@ -125,7 +125,7 @@ pub fn find_pzz_key(raw: &[u8]) -> Option<u32> {
         return None;
     }
     let raw_w0 = ru32(raw, 0);
-    for fc in 2u32..200 {
+    for fc in 1u32..200 {
         let key = raw_w0 ^ fc;
         let limit = sz.min(0x4000);
         let dec_partial = xor_decrypt(&raw[..limit], key);
