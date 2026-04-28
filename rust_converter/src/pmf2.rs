@@ -719,6 +719,35 @@ pub struct Pmf2Meta {
     pub bone_meshes: Vec<BoneMeshMeta>,
 }
 
+const I16_POSITION_SATURATION_RATIO: f32 = 32767.0 / 32768.0;
+
+pub fn compute_auto_bbox_from_bone_meshes(bone_meshes: &[BoneMeshMeta]) -> Option<[f32; 3]> {
+    if bone_meshes.is_empty() {
+        return None;
+    }
+    let mut bbox = [0.0f32; 3];
+    let mut has_vertex = false;
+    for bm in bone_meshes {
+        for lv in &bm.local_vertices {
+            has_vertex = true;
+            bbox[0] = bbox[0].max(lv[0].abs());
+            bbox[1] = bbox[1].max(lv[1].abs());
+            bbox[2] = bbox[2].max(lv[2].abs());
+        }
+    }
+    if !has_vertex {
+        return None;
+    }
+    for axis in &mut bbox {
+        if *axis < 1e-6 {
+            *axis = 1.0;
+        } else {
+            *axis /= I16_POSITION_SATURATION_RATIO;
+        }
+    }
+    Some(bbox)
+}
+
 pub fn build_meta(
     model_name: &str,
     sections: &[BoneSection],
@@ -869,7 +898,7 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
 
 pub fn rebuild_pmf2(meta: &Pmf2Meta) -> Vec<u8> {
     let num_sec = meta.sections.len();
-    let bbox = &meta.bbox;
+    let bbox = compute_auto_bbox_from_bone_meshes(&meta.bone_meshes).unwrap_or(meta.bbox);
 
     let mut section_data_list = Vec::new();
     for sm in &meta.sections {
@@ -890,9 +919,16 @@ pub fn rebuild_pmf2(meta: &Pmf2Meta) -> Vec<u8> {
             sec_buf[i] = 0xFF;
         }
 
-        if let Some(mesh) = meta.bone_meshes.iter().find(|bm| bm.bone_index == sm.index) {
-            if !mesh.local_vertices.is_empty() {
-                let ge_data = build_ge_commands(mesh, bbox);
+        let mesh_for_section = meta.bone_meshes.iter().find(|bm| bm.bone_index == sm.index);
+        let has_mesh_data = mesh_for_section
+            .map(|mesh| !mesh.local_vertices.is_empty())
+            .unwrap_or(false);
+        let has_mesh_flag = if has_mesh_data { 0u32 } else { 1u32 };
+        sec_buf[0x70..0x74].copy_from_slice(&has_mesh_flag.to_le_bytes());
+
+        if let Some(mesh) = mesh_for_section {
+            if has_mesh_data {
+                let ge_data = build_ge_commands(mesh, &bbox);
                 sec_buf.extend_from_slice(&ge_data);
             }
         }
@@ -962,7 +998,7 @@ pub fn patch_pmf2_with_mesh_updates(
 
     let threshold = matrix_delta_threshold.max(0.0);
     let num_sec = template_sections.len();
-    let bbox = &meta.bbox;
+    let bbox = &template_bbox;
 
     let mut section_data_list: Vec<Vec<u8>> = Vec::with_capacity(num_sec);
 
@@ -1000,24 +1036,35 @@ pub fn patch_pmf2_with_mesh_updates(
         let orig_faces = template_face_count.get(&key).copied().unwrap_or(0);
         let dae_face_count = src_mesh.map(|m| m.faces.len()).unwrap_or(0);
         let dae_vert_count = src_mesh.map(|m| m.local_vertices.len()).unwrap_or(0);
-
-        let needs_mesh_rebuild = src_mesh.is_some()
-            && dae_face_count > 0
-            && dae_face_count != orig_faces;
+        let template_had_mesh = tsec.has_mesh && orig_faces > 0;
 
         let mut sec_buf = header;
-        if needs_mesh_rebuild {
-            let mesh = src_mesh.unwrap();
-            let ge_data = build_ge_commands(mesh, bbox);
-            if !ge_data.is_empty() {
-                sec_buf.extend_from_slice(&ge_data);
-                eprintln!(
-                    "  [patch-mesh] rebuilt GE for {}: {} verts, {} faces (was {} faces)",
-                    tsec.name, dae_vert_count, dae_face_count, orig_faces
-                );
+        if src_mesh.is_some() && dae_face_count > 0 {
+            if dae_face_count != orig_faces {
+                let mesh = src_mesh.unwrap();
+                let ge_data = build_ge_commands(mesh, bbox);
+                if !ge_data.is_empty() {
+                    if !template_had_mesh {
+                        sec_buf[0x70..0x74].copy_from_slice(&0u32.to_le_bytes());
+                    }
+                    sec_buf.extend_from_slice(&ge_data);
+                    eprintln!(
+                        "  [patch-mesh] rebuilt GE for {}: {} verts, {} faces (was {} faces)",
+                        tsec.name, dae_vert_count, dae_face_count, orig_faces
+                    );
+                } else if sec_end > header_end {
+                    sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
+                }
             } else if sec_end > header_end {
                 sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
             }
+        } else if template_had_mesh && (src_mesh.is_none() || dae_face_count == 0) {
+            sec_buf[0x70..0x74].copy_from_slice(&1u32.to_le_bytes());
+            sec_buf.truncate(0x100);
+            eprintln!(
+                "  [patch-mesh] REMOVED mesh for {}: was {} faces, set +0x70=1 (no-mesh flag)",
+                tsec.name, orig_faces
+            );
         } else if sec_end > header_end {
             sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
         }
@@ -1231,5 +1278,100 @@ mod tests {
             patch_pmf2_transforms_from_meta_with_threshold(&template_pmf2, &source_meta, 1e-4)
                 .unwrap();
         assert_eq!(patched, template_pmf2);
+    }
+
+    #[test]
+    fn rebuild_pmf2_recomputes_bbox_from_mesh_vertices() {
+        let meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [1.0, 1.0, 1.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![BoneMeshMeta {
+                bone_index: 0,
+                bone_name: "root".to_string(),
+                vertex_count: 3,
+                face_count: 1,
+                has_uv: false,
+                has_normals: false,
+                draw_call_vtypes: Vec::new(),
+                local_vertices: vec![
+                    [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [-2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, -3.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                ],
+                faces: vec![[0, 1, 2]],
+            }],
+        };
+        let pmf2 = rebuild_pmf2(&meta);
+        let (_, bbox) = parse_pmf2_sections(&pmf2);
+        assert!(bbox[0] > 4.0);
+        assert!(bbox[2] > 3.0);
+    }
+
+    #[test]
+    fn rebuild_pmf2_sets_no_mesh_flag_for_sections_without_display_list() {
+        let meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [1.0, 1.0, 1.0],
+            section_count: 2,
+            sections: vec![
+                BoneSection {
+                    index: 0,
+                    name: "root".to_string(),
+                    offset: 0,
+                    size: 0,
+                    local_matrix: identity(),
+                    parent: -1,
+                    has_mesh: true,
+                    origin_offset: None,
+                    category: String::new(),
+                },
+                BoneSection {
+                    index: 1,
+                    name: "child".to_string(),
+                    offset: 0,
+                    size: 0,
+                    local_matrix: identity(),
+                    parent: 0,
+                    has_mesh: false,
+                    origin_offset: None,
+                    category: String::new(),
+                },
+            ],
+            bone_meshes: vec![BoneMeshMeta {
+                bone_index: 0,
+                bone_name: "root".to_string(),
+                vertex_count: 3,
+                face_count: 1,
+                has_uv: false,
+                has_normals: false,
+                draw_call_vtypes: Vec::new(),
+                local_vertices: vec![
+                    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                ],
+                faces: vec![[0, 1, 2]],
+            }],
+        };
+
+        let pmf2 = rebuild_pmf2(&meta);
+        let sec0_off = ru32(&pmf2, 0x20) as usize;
+        let sec1_off = ru32(&pmf2, 0x24) as usize;
+        let sec0_flag = ru32(&pmf2, sec0_off + 0x70);
+        let sec1_flag = ru32(&pmf2, sec1_off + 0x70);
+        assert_eq!(sec0_flag, 0);
+        assert_eq!(sec1_flag, 1);
     }
 }

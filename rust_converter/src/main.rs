@@ -324,28 +324,45 @@ fn cmd_dae_to_pmf2(
     meta_out: Option<&std::path::Path>,
     patch_mesh: bool,
 ) -> Result<()> {
-    let meta = dae::read_dae_to_meta(dae_path, name)?;
+    let mut meta = dae::read_dae_to_meta(dae_path, name)?;
+    if let Some(bbox) = pmf2::compute_auto_bbox_from_bone_meshes(&meta.bone_meshes) {
+        meta.bbox = bbox;
+    }
     let pmf2_data = if let Some(template_path) = template_pmf2 {
         let template = std::fs::read(template_path)?;
         if patch_mesh {
-            pmf2::patch_pmf2_with_mesh_updates(
-                &template,
-                &meta,
-                matrix_delta_threshold,
-            )
+            let (_, template_bbox) = pmf2::parse_pmf2_sections(&template);
+            let needs_larger_bbox = meta
+                .bbox
+                .iter()
+                .zip(template_bbox.iter())
+                .any(|(required, current)| required > &(current + 1e-6));
+            if needs_larger_bbox {
+                eprintln!(
+                    "Template bbox too small for imported mesh, keeping template PMF2 layout and template bbox"
+                );
+            }
+            pmf2::patch_pmf2_with_mesh_updates(&template, &meta, matrix_delta_threshold).ok_or_else(
+                || {
+                    anyhow::anyhow!(
+                        "failed to patch template PMF2 with DAE transforms: {}",
+                        template_path.display()
+                    )
+                },
+            )?
         } else {
             pmf2::patch_pmf2_transforms_from_meta_with_threshold(
                 &template,
                 &meta,
                 matrix_delta_threshold,
             )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "failed to patch template PMF2 with DAE transforms: {}",
+                    template_path.display()
+                )
+            })?
         }
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "failed to patch template PMF2 with DAE transforms: {}",
-                template_path.display()
-            )
-        })?
     } else {
         pmf2::rebuild_pmf2(&meta)
     };
@@ -520,7 +537,10 @@ struct ExportResult {
 
 fn cmd_import(meta_path: &std::path::Path, out: Option<&std::path::Path>) -> Result<()> {
     let text = std::fs::read_to_string(meta_path)?;
-    let meta: pmf2::Pmf2Meta = serde_json::from_str(&text)?;
+    let mut meta: pmf2::Pmf2Meta = serde_json::from_str(&text)?;
+    if let Some(bbox) = pmf2::compute_auto_bbox_from_bone_meshes(&meta.bone_meshes) {
+        meta.bbox = bbox;
+    }
     let pmf2_data = pmf2::rebuild_pmf2(&meta);
     let out_path = out
         .map(PathBuf::from)

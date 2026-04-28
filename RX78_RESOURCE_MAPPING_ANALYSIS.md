@@ -1088,3 +1088,442 @@ Because these images are 480x272, they are more likely full-screen UI/background
 
 However, the repeated references from `pl00ov5.bin` make them worth testing in game if the visible target is a UI/cut-in/background element.
 
+## PZZ Tail: Complete Reverse Engineering
+
+### Root Cause of Infinite Loading
+
+The 16-byte PZZ tail is a **custom integrity checksum** computed during XOR decryption. The game verifies this checksum at load time. If it does not match, the resource load fails silently, causing infinite loading.
+
+This is why even a 1-bit change to `pl0a.pzz/stream001.gim` caused infinite loading: the stream data changed, but the 16-byte tail checksum was not recomputed.
+
+### Call Chain
+
+```text
+sub_88867AC          top-level resource loader
+  sub_88858F0        looks up file body size from ROM table
+  sub_8886260        reads file from AFS / save cache
+  sub_8885A84        XOR decrypt + hash verify
+    sub_880A338        memcpy: copies last 16 bytes (raw tail)
+    sub_8887910        submits decrypt+hash job (command type 1)
+      → worker thread → sub_88879E0
+        → sub_88BD520    hash wrapper
+          sub_88BD728    XOR decrypt in-place + compute 16-byte hash
+          sub_880A2A4    memcmp: compare computed hash vs stored tail
+  sub_88866E4        parse decrypted PZZ header (entry count, descriptors)
+  sub_8885B78        decompress PZZ streams (command type 2)
+    → worker thread → sub_88868C4  zlib inflate per-stream
+```
+
+### Conditional Hash Check
+
+The hash check is gated by a flag:
+
+```text
+if ( (*(_BYTE *)(state + 1) & 1) != 0 )
+    → perform decrypt + hash verify
+else
+    → skip (file is not XOR-encrypted)
+```
+
+All tested `pl*.pzz` files have this flag set.
+
+### File Layout
+
+```text
+Offset 0          .. body_size-1   : XOR-encrypted body
+Offset body_size  .. body_size+15  : raw checksum (NOT encrypted)
+```
+
+Total file size = body_size + 16.
+
+The body size for each Z_DATA entry is stored in a ROM table at `0x8A56160`:
+
+```text
+dword_8A56160[z_data_entry_index] = body_size
+```
+
+`body_size + 16` equals the AFS entry file size.
+
+### XOR Key Derivation
+
+The XOR decryption key is derived from `body_size` using two 256-byte substitution tables.
+
+Step 1 — extract nibble from body_size:
+
+```text
+shift = 3
+while shift < 30:
+    nibble = (body_size >> shift) & 0xF
+    if nibble != 0: break
+    shift += 3
+```
+
+Step 2 — derive secondary index:
+
+```text
+derived = (byte)(13 * (nibble + 3))
+```
+
+Step 3 — table lookups:
+
+```text
+key1 = table_lookup(nibble,  step=3, table1_at_0x8A0E038)
+key2 = table_lookup(derived, step=2, table2_at_0x8A0E138)
+xor_key = key1 ^ key2
+```
+
+Where `table_lookup(idx, step, table)` reads 4 bytes:
+
+```text
+b0 = table[idx]
+b1 = table[(idx + step) & 0xFF]
+b2 = table[(idx + 2*step) & 0xFF]
+b3 = table[(idx + 3*step) & 0xFF]
+return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+```
+
+### Verified Key Derivations
+
+```text
+pl0a.pzz  (entry 1659):
+  body_size = 631168 = 0x9A180
+  nibble = 6  (at shift=6)
+  derived = 0x75
+  key1 = 0x6C07313D
+  key2 = 0x26B03ABD
+  xor_key = 0x4AB70B80  ✓ matches find_pzz_key result
+
+pl0al.pzz (entry 1736):
+  body_size = 609664 = 0x94D80
+  nibble = 6  (at shift=6)
+  derived = 0x75
+  key1 = 0x6C07313D
+  key2 = 0x26B03ABD
+  xor_key = 0x4AB70B80  ✓ same key (same nibble)
+
+pl00l.pzz (entry 1726):
+  body_size = 861952 = 0xD2700
+  nibble = 12  (at shift=6)
+  derived = 0xC3
+  xor_key = 0x1CD56D68  ✓ matches first_word ^ 12
+```
+
+### Substitution Tables (256 bytes each)
+
+Table 1 at `0x8A0E038`:
+
+```text
+1e 65 c2 22 20 c5 6c f1 b7 07 73 2a 31 43 48 3d
+75 30 1b 78 09 2d c7 ad 0a f6 3c ac 5a 7e dd 0d
+5b 25 00 fd 9b 02 bd 52 08 93 8b 9d 46 11 34 b2
+bb cd d0 c4 84 c6 d4 28 6e cf 32 9e 19 eb e2 40
+ca c9 c1 a0 1c 60 e0 39 4c 56 45 69 e3 3e 9f 05
+35 cc b0 13 0f da f8 26 fe 99 54 d8 ae 92 29 e4
+72 2b c0 04 23 15 37 a3 f4 49 a5 5d bf 7c 38 c8
+06 89 be db b1 a1 27 74 4d 4b 03 51 16 01 77 f0
+55 5e 97 d3 0e 50 ed 63 6d d5 c3 4f 82 bc 91 80
+a9 ce 3b 36 ec 79 1d 5c 24 98 8e df e8 4a aa f9
+e1 ef fc 9c e9 17 ee b8 a4 f2 af 83 1f fa 58 18
+a8 6f 71 8c 95 e6 85 f7 64 f5 b5 33 d7 12 e7 7f
+ff 86 5f 9a 62 8f 2f 68 d6 a6 b4 53 3a 76 d1 7a
+7d ab 21 90 6a ba ea fb 44 59 b6 87 e5 0b 1a 67
+8d b3 14 a7 a2 3f d9 0c 8a 81 10 7b dc cb f3 66
+2e 57 b9 47 61 4e 2c 42 de 96 6b 41 94 88 70 d2
+```
+
+Table 2 at `0x8A0E138`:
+
+```text
+74 97 27 1e 65 fe f5 09 71 78 1d 54 7b d3 16 98
+87 4c e9 33 b9 82 8f 6c 3e 5d 24 55 23 7e ee d9
+32 e2 eb 94 2f 9c 31 7a 02 10 2b cf 56 a7 ce 6b
+c6 67 06 4e b8 b4 cc ae 8e d1 e5 c8 59 cd 8c 49
+51 03 bf 89 4f 95 07 25 4b c4 e7 d2 fd 44 96 91
+66 05 80 c3 19 0d ff 20 a8 2a d8 79 d5 5b 84 9d
+c0 36 6a 9e a0 9f 3b a4 e0 21 2c 5f 53 be 11 81
+28 47 a1 88 12 26 39 b0 fb 3a 50 bd 5a f4 bc ab
+40 04 b3 f6 9b cb e1 3f bb 1c de 73 0f 08 01 15
+13 42 72 4d 0c 1a b7 7d f7 ec ac 48 62 34 fa ba
+a6 df 7c 92 8a ad b5 75 64 69 c2 5c da 90 68 43
+a5 aa f9 e6 41 63 57 6d 14 93 6e 61 83 c5 17 52
+4a 30 f2 2d 22 e8 35 76 d7 45 f1 dc b6 c7 ca db
+ed d4 f3 d0 af 60 b2 18 38 c1 ea a3 dd a2 3c 0e
+8b 9a 3d 1f a9 00 0b ef e3 5e 46 b1 99 29 85 1b
+f8 86 37 58 c9 77 fc 8d 2e f0 0a d6 e4 70 7f 6f
+```
+
+### Checksum Algorithm
+
+Function: `sub_88BD728` at `0x88BD728`
+
+This function both XOR-decrypts the body in-place and computes the 16-byte checksum in a single pass.
+
+**Initialization:**
+
+```text
+sum_lo  = (body_size * 7) >> 1     (u32, truncated)
+sum_hi  = 0
+xor_lo  = 0xFFFFFFFF
+xor_hi  = 0xFFFFFFFF
+```
+
+**Per-word processing** (for each little-endian u32 `word` in the encrypted body):
+
+```text
+decrypted = word ^ xor_key
+*ptr      = decrypted                       (decrypt in-place)
+
+new_sum   = ((u64)sum_hi << 32 | sum_lo) + (u64)decrypted
+sum_lo    = (u32)(new_sum & 0xFFFFFFFF)
+sum_hi    = (u32)(new_sum >> 32)
+
+xor_lo   ^= sum_lo
+xor_hi   ^= sum_hi
+```
+
+**Remainder bytes** (if `body_size % 4 != 0`):
+
+The last 1-3 bytes are read as a partial u32 (little-endian, zero-padded), XOR'd with `xor_key & mask`, stored back masked, and added to the running sum.
+
+Masks: `{1: 0x000000FF, 2: 0x0000FFFF, 3: 0x00FFFFFF}`
+
+**Output:**
+
+```text
+tail[0..3]   = sum_lo   (u32 LE)
+tail[4..7]   = sum_hi   (u32 LE)
+tail[8..11]  = xor_lo   (u32 LE)
+tail[12..15] = xor_hi   (u32 LE)
+```
+
+### How to Repack PZZ Correctly
+
+When modifying a PZZ stream and repacking:
+
+1. Build the new decrypted PZZ body (descriptor table + all chunks, same layout as original).
+2. Derive `xor_key` from `body_size` using the table lookup algorithm above.
+3. XOR-encrypt the body: `encrypted[i] ^= xor_key_bytes[i % 4]` for all bytes.
+4. Compute the 16-byte checksum over the **encrypted** body by running `sub_88BD728` logic:
+   - Initialize `sum_lo`, `sum_hi`, `xor_lo`, `xor_hi` from `body_size`.
+   - For each u32: decrypt (XOR), accumulate sum, accumulate XOR chain.
+   - Alternatively: run the same algorithm on the **decrypted** body directly, since the hash is over decrypted values.
+5. Append the raw 16-byte checksum after the encrypted body.
+
+The checksum can be computed equivalently from decrypted data:
+
+```text
+Given: decrypted_body (all bytes before the tail)
+body_size = len(decrypted_body)
+
+sum_lo  = (body_size * 7) >> 1
+sum_hi  = 0
+xor_lo  = 0xFFFFFFFF
+xor_hi  = 0xFFFFFFFF
+
+for each u32 word in decrypted_body (LE):
+    sum64    = ((u64)sum_hi << 32 | sum_lo) + word
+    sum_lo   = (u32)(sum64)
+    sum_hi   = (u32)(sum64 >> 32)
+    xor_lo  ^= sum_lo
+    xor_hi  ^= sum_hi
+
+checksum = sum_lo || sum_hi || xor_lo || xor_hi   (16 bytes LE)
+```
+
+Then the final PZZ file is:
+
+```text
+xor_encrypt(decrypted_body, xor_key) || checksum
+```
+
+### IDA Function Reference
+
+```text
+0x88BD728  pzz_decrypt_and_hash     XOR decrypt body + compute 16-byte checksum
+0x88BD520  pzz_verify_hash          calls hash, then memcmp with stored tail
+0x88BD560  pzz_derive_key_params    extract nibble + derived from body_size
+0x88BD5B4  pzz_table_lookup         4-byte key from substitution table
+0x8885A84  pzz_decrypt_verify       orchestrates tail copy + decrypt+hash job
+0x88868C4  pzz_decompress_streams   iterates descriptors, zlib inflate per stream
+0x88866E4  pzz_parse_header         reads entry_count and descriptor pointers
+0x8862888  zlib_inflate_wrapper      zlib decompression (calls inflate loop)
+0x880A2A4  memcmp                   byte comparison
+0x880A338  memcpy                   byte copy
+0x8A0E038  pzz_sbox_table1          256-byte substitution table 1
+0x8A0E138  pzz_sbox_table2          256-byte substitution table 2
+0x8A56160  z_data_body_size_table   body_size per Z_DATA entry index
+```
+
+## PMF2 Vertex Coordinate System & Rendering Pipeline
+
+### Confirmed via IDA Reverse Engineering
+
+The PMF2 header bbox at offset `0x10-0x18` is **not** a metadata field — it is a **runtime rendering scale factor** used by the GE (Graphics Engine) hardware pipeline.
+
+### Rendering Call Chain
+
+```text
+sub_88BCE3C    initialize render sections from PMF2 data
+  → reads PMF2 header bbox [0x10, 0x14, 0x18]
+  → stores bbox as 3 floats into render_section + 96
+
+sub_89841E8    emit normal textured draw GE commands
+  → calls sub_886BBDC to build scaled world matrix
+  → calls sub_89BEC88 to upload world matrix to GE
+  → calls sub_89BED1C to execute display list (CALL command)
+
+sub_886BBDC    VFPU matrix scale (the critical function)
+  → lv.q  C100.q, (render_section + 96)    ; load bbox [sx, sy, sz, ?]
+  → lv.q  C000-C030, (bone_world_matrix)   ; load 4x4 world matrix
+  → vscl.q  row0 *= sx                      ; scale X-axis row by bbox[0]
+  → vscl.q  row1 *= sy                      ; scale Y-axis row by bbox[1]
+  → vscl.q  row2 *= sz                      ; scale Z-axis row by bbox[2]
+  → row3 unchanged (translation)
+```
+
+### Coordinate System
+
+PMF2 vertices are stored as **signed 16-bit integers** (i16, range [-32768, 32767]).
+
+The game converts them to world-space positions via:
+
+```text
+world_pos = GE_ModelViewProj × (bone_world_matrix × diag(bbox)) × i16_vertex
+```
+
+Where:
+
+```text
+diag(bbox) = | bbox[0]  0       0       0 |
+             | 0        bbox[1] 0       0 |
+             | 0        0       bbox[2] 0 |
+             | 0        0       0       1 |
+```
+
+The bbox values define the **maximum representable extent** in each axis. An i16 value of 32767 maps to exactly `bbox[axis]` in bone-local space.
+
+### DAE ↔ PMF2 Coordinate Mapping
+
+Export (PMF2 → DAE):
+
+```text
+dae_local_pos = i16_pos × bbox / 32768.0
+```
+
+Import (DAE → PMF2):
+
+```text
+i16_pos = clamp(round(dae_local_pos × 32768.0 / bbox), -32768, 32767)
+```
+
+### PMF2 Section Header Layout (256 bytes = 0x100)
+
+```text
+0x00-0x3F   4×4 local bone matrix (16 × f32, row-major)
+0x40-0x4F   bounding center + radius (4 × f32)
+0x50-0x5F   color scale / material params (4 × f32, typically [1.0, 1.0, 1.0, 0.0])
+0x60-0x6F   bone name (null-terminated ASCII, 16 bytes max)
+0x70        has_mesh flag (u32): 0 = has display list, 1 = no display list
+0x74        auxiliary data (u32): 0 for mesh sections, varies for non-mesh
+0x78        reserved (u32)
+0x7C        parent section index (u32, 0xFFFFFFFF = root)
+0x80        sibling link (u32, 0xFFFFFFFF = none)
+0x84-0xBF   additional links (unused slots = 0xFFFFFFFF)
+0xC0-0xFF   children section indices (up to 16 slots, 0xFFFFFFFF = empty)
+```
+
+### Display List Structure (at section_offset + 0x100)
+
+```text
+0x14000000   ORIGIN (reset address base)
+0x10000000   BASE (set base address = 0)
+0x02xxxxxx   IADDR (index buffer offset from base)
+0x01xxxxxx   VADDR (vertex buffer offset from base)
+0x12xxxxxx   VERTEXTYPE (vertex format descriptor)
+0x9Bxxxxxx   CMD_9B (material/texture state, per draw call)
+0x04TTNNNN   PRIM (TT=primitive type 04=triangles, NNNN=vertex count)
+...          (multiple PRIM+CMD_9B pairs)
+0x0B000000   RET (end of display list)
+```
+
+### Vertex Format (VERTEXTYPE = 0x001142)
+
+```text
+bits [1:0]  = 2  → texture coords: 16-bit signed
+bits [6:5]  = 2  → normals: 16-bit signed
+bits [8:7]  = 2  → positions: 16-bit signed
+```
+
+Per-vertex stride = 16 bytes:
+
+```text
+offset 0:  tu (i16)   texture U
+offset 2:  tv (i16)   texture V
+offset 4:  nx (i16)   normal X
+offset 6:  ny (i16)   normal Y
+offset 8:  nz (i16)   normal Z
+offset 10: px (i16)   position X
+offset 12: py (i16)   position Y
+offset 14: pz (i16)   position Z
+```
+
+Texture UV mapping: `uv_float = i16_value / 32768.0`
+
+Normal mapping: `normal_float = i16_value / 32767.0`
+
+Position mapping: `local_pos = i16_value × bbox[axis] / 32768.0`
+
+### has_mesh Flag (Section +0x70)
+
+This field controls whether the game attempts to render a display list for this section:
+
+```text
+*(pmf2_section + 0x70) == 0  → game sets display_list = section + 256, renders mesh
+*(pmf2_section + 0x70) != 0  → game skips rendering this section
+```
+
+When removing a mesh from a section, this field MUST be set to 1. Leaving it as 0 with an empty/zeroed display list causes the GE state machine to process invalid commands, corrupting rendering for all subsequent draw calls (other models, stage objects, etc.).
+
+### Size Constraints for New Meshes
+
+All sections in a single PMF2 file share the same bbox. The maximum vertex extent in DAE local space is:
+
+```text
+X: ±bbox[0]   (for pl0a: ±2.676)
+Y: ±bbox[1]   (for pl0a: ±12.560)
+Z: ±bbox[2]   (for pl0a: ±12.766)
+```
+
+Vertices exceeding these ranges are clamped to i16 extremes, causing visible distortion.
+
+To support larger meshes, a full vertex re-encoding is required:
+
+1. Decode all original sections' vertices using old bbox.
+2. Compute new bbox from all vertices (original + new).
+3. Re-encode ALL sections' vertex data with the new bbox.
+4. Update the PMF2 header bbox at 0x10-0x18.
+5. Regenerate all display lists with the re-encoded vertex data.
+
+### Verified Experiment Results
+
+| Test | Result |
+|---|---|
+| Zero all PMF2+GIM streams in pl0a/pl0al | Nu Gundam completely invisible, other objects affected |
+| Remove m11 mesh without setting +0x70=1 | Model partially invisible, GPU state corruption, stage objects missing |
+| Remove m11 mesh with +0x70=1 | Only head (m11) cleanly removed, everything else normal |
+| Add new meshes within bbox range | New geometry renders correctly |
+| Add new meshes exceeding bbox range | New geometry distorted (axis clamping) |
+| Expand bbox without re-encoding old vertices | New meshes correct, old meshes shrunk/distorted |
+
+### IDA Function Reference (PMF2 Rendering)
+
+```text
+0x88BCE3C  pmf2_init_render_sections    reads bbox from header, populates render rows
+0x886BBDC  vfpu_scale_world_matrix      scales world matrix rows by bbox (VFPU vscl.q)
+0x89841E8  emit_normal_draw             sets up texture, matrix, calls display list
+0x89BEC88  upload_world_matrix          emits GE WORLD_MATRIX commands (0x3A/0x3B)
+0x89BED1C  emit_display_list_call       emits GE CALL command to display list
+0x89BE630  emit_ambient_color           emits GE AMBIENT_COLOR command (0x55)
+0x89BE7D4  emit_texture_setup           emits texture/CLUT GE commands
+```
+

@@ -1,4 +1,7 @@
-use crate::pmf2::{compute_world_matrices, BoneMeshData, BoneMeshMeta, BoneSection, Pmf2Meta};
+use crate::pmf2::{
+    compute_auto_bbox_from_bone_meshes, compute_world_matrices, BoneMeshData, BoneMeshMeta,
+    BoneSection, Pmf2Meta,
+};
 use anyhow::{anyhow, Context, Result};
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -846,19 +849,7 @@ fn parse_dae_to_meta_text(xml: &str, model_name: &str) -> Result<Pmf2Meta> {
         bm.face_count = bm.faces.len();
     }
 
-    let mut bbox = [0.0f32; 3];
-    for bm in &bone_meshes {
-        for lv in &bm.local_vertices {
-            bbox[0] = bbox[0].max(lv[0].abs());
-            bbox[1] = bbox[1].max(lv[1].abs());
-            bbox[2] = bbox[2].max(lv[2].abs());
-        }
-    }
-    for b in &mut bbox {
-        if *b < 1e-6 {
-            *b = 1.0;
-        }
-    }
+    let bbox = compute_auto_bbox_from_bone_meshes(&bone_meshes).unwrap_or([1.0, 1.0, 1.0]);
 
     Ok(Pmf2Meta {
         model_name: model_name.to_string(),
@@ -1920,5 +1911,42 @@ mod tests {
         let meta = parse_dae_to_meta_text(xml, "weights_test").unwrap();
         assert_eq!(meta.bone_meshes.len(), 1);
         assert_eq!(meta.bone_meshes[0].bone_index, 1);
+    }
+
+    #[test]
+    fn computed_bbox_has_i16_safety_margin() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <library_geometries>
+    <geometry id="geom0" name="geom0">
+      <mesh>
+        <source id="geom0-positions">
+          <float_array id="geom0-positions-array" count="9">2 0 0 -1 0 0 0 0 3</float_array>
+          <technique_common><accessor source="#geom0-positions-array" count="3" stride="3"/></technique_common>
+        </source>
+        <vertices id="geom0-vertices">
+          <input semantic="POSITION" source="#geom0-positions"/>
+        </vertices>
+        <triangles count="1">
+          <input semantic="VERTEX" source="#geom0-vertices" offset="0"/>
+          <p>0 1 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="mesh0" name="mesh0">
+        <instance_geometry url="#geom0"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>"##;
+
+        let meta = parse_dae_to_meta_text(xml, "bbox_margin").unwrap();
+        assert!(meta.bbox[0] > 2.0);
+        assert!(meta.bbox[1] > 3.0);
+        assert!(meta.bbox[2] >= 1.0);
     }
 }
