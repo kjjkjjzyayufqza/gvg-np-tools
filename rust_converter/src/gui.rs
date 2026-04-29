@@ -1,6 +1,7 @@
 mod asset_tree;
 mod editors;
 mod fonts;
+mod persist;
 mod inspector;
 mod preview;
 mod status;
@@ -24,6 +25,15 @@ pub(super) fn remember_parent_dir(memory: &mut Option<std::path::PathBuf>, path:
     }
 }
 
+pub(super) fn touch_dialog_dir_parent(
+    slot: &mut Option<std::path::PathBuf>,
+    path: &Path,
+    gui_dirty: &mut bool,
+) {
+    remember_parent_dir(slot, path);
+    *gui_dirty = true;
+}
+
 pub struct WgpuState {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -43,12 +53,13 @@ pub struct GvgModdingApp {
     gpu_texture_bind_group: Option<wgpu::BindGroup>,
     gpu_mesh_stream_index: Option<usize>,
     wgpu_state: Option<WgpuState>,
-    recent_afs_path: Option<std::path::PathBuf>,
+    recent_afs_paths: Vec<std::path::PathBuf>,
     last_dir_open_afs: Option<std::path::PathBuf>,
     last_dir_open_pzz: Option<std::path::PathBuf>,
     last_dir_save_pzz_as: Option<std::path::PathBuf>,
     last_dir_patch_afs_entry: Option<std::path::PathBuf>,
     last_dir_save_afs_as: Option<std::path::PathBuf>,
+    gui_state_dirty: bool,
     /// User-dismissable error dialog; same text is mirrored in `status`.
     pending_alert: Option<String>,
 }
@@ -87,6 +98,11 @@ impl GvgModdingApp {
 
         fonts::install_cjk_fonts(&cc.egui_ctx);
 
+        let persisted = persist::load();
+        if let Some(p) = persist::state_file_path() {
+            eprintln!("[gui] GUI persistence: {}", p.display());
+        }
+
         Self {
             workspace: ModWorkspace::default(),
             tree_state: AssetTreeState::default(),
@@ -100,12 +116,13 @@ impl GvgModdingApp {
             gpu_texture_bind_group: None,
             gpu_mesh_stream_index: None,
             wgpu_state,
-            recent_afs_path: None,
-            last_dir_open_afs: None,
-            last_dir_open_pzz: None,
-            last_dir_save_pzz_as: None,
-            last_dir_patch_afs_entry: None,
-            last_dir_save_afs_as: None,
+            recent_afs_paths: persisted.recent_afs_paths.clone(),
+            last_dir_open_afs: persisted.last_dir_open_afs,
+            last_dir_open_pzz: persisted.last_dir_open_pzz,
+            last_dir_save_pzz_as: persisted.last_dir_save_pzz_as,
+            last_dir_patch_afs_entry: persisted.last_dir_patch_afs_entry,
+            last_dir_save_afs_as: persisted.last_dir_save_afs_as,
+            gui_state_dirty: false,
             pending_alert: None,
         }
     }
@@ -161,6 +178,7 @@ impl eframe::App for GvgModdingApp {
             &mut self.last_dir_save_pzz_as,
             &mut self.last_dir_patch_afs_entry,
         );
+        self.gui_state_dirty |= editor_result.dirs_changed;
         if let Some(msg) = editor_result.status {
             self.status = msg.clone();
             if editor_result.error_modal {
@@ -169,6 +187,14 @@ impl eframe::App for GvgModdingApp {
         }
 
         Self::show_error_modal(ctx, &mut self.pending_alert);
+
+        self.try_flush_gui_state_disk();
+    }
+
+    fn on_exit(&mut self) {
+        if let Err(e) = persist::save(&self.gui_state_snapshot()) {
+            eprintln!("[gui] final GUI persistence write failed: {}", e);
+        }
     }
 }
 
@@ -200,6 +226,38 @@ impl GvgModdingApp {
         self.pending_alert = Some(msg);
     }
 
+    fn gui_state_snapshot(&self) -> persist::PersistedGuiState {
+        persist::PersistedGuiState {
+            last_dir_open_afs: self.last_dir_open_afs.clone(),
+            last_dir_open_pzz: self.last_dir_open_pzz.clone(),
+            last_dir_save_pzz_as: self.last_dir_save_pzz_as.clone(),
+            last_dir_patch_afs_entry: self.last_dir_patch_afs_entry.clone(),
+            last_dir_save_afs_as: self.last_dir_save_afs_as.clone(),
+            recent_afs_paths: self.recent_afs_paths.clone(),
+        }
+    }
+
+    fn mark_gui_state_dirty(&mut self) {
+        self.gui_state_dirty = true;
+    }
+
+    fn record_recent_afs_open_success(&mut self, path: std::path::PathBuf) {
+        self.recent_afs_paths.retain(|p| p != &path);
+        self.recent_afs_paths.insert(0, path);
+        self.recent_afs_paths.truncate(persist::RECENT_AFS_MAX);
+        self.mark_gui_state_dirty();
+    }
+
+    fn try_flush_gui_state_disk(&mut self) {
+        if !self.gui_state_dirty {
+            return;
+        }
+        match persist::save(&self.gui_state_snapshot()) {
+            Ok(()) => self.gui_state_dirty = false,
+            Err(e) => eprintln!("[gui] could not persist GUI state: {}", e),
+        }
+    }
+
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -211,16 +269,36 @@ impl GvgModdingApp {
                     self.open_pzz_dialog();
                     ui.close();
                 }
-                if let Some(recent) = &self.recent_afs_path.clone() {
-                    let label = format!(
-                        "Reopen {}",
-                        recent.file_name().and_then(|n| n.to_str()).unwrap_or("?")
-                    );
-                    if ui.button(label).clicked() {
-                        self.open_afs_path(recent.clone());
-                        ui.close();
+                ui.menu_button("Recent AFS", |ui| {
+                    if self.recent_afs_paths.is_empty() {
+                        ui.label(egui::RichText::new("(empty)").weak());
+                    } else {
+                        for path in self.recent_afs_paths.clone() {
+                            let missing = !path.exists();
+                            let fname = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("(invalid)")
+                                .to_string();
+                            let label = fname + if missing { " (missing)" } else { "" };
+                            let txt = if missing {
+                                egui::RichText::new(label).weak()
+                            } else {
+                                egui::RichText::new(label)
+                            };
+                            let r = ui.button(txt).on_hover_text(path.display().to_string());
+                            if r.clicked() {
+                                self.open_afs_path(path);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Clear recent list").clicked() {
+                            self.recent_afs_paths.clear();
+                            self.mark_gui_state_dirty();
+                        }
                     }
-                }
+                });
                 ui.separator();
                 if ui.button("Save PZZ As...").clicked() {
                     self.editors.save_planner = true;
@@ -259,11 +337,12 @@ impl GvgModdingApp {
     }
 
     fn open_afs_path(&mut self, path: std::path::PathBuf) {
-        self.recent_afs_path = Some(path.clone());
-        remember_parent_dir(&mut self.last_dir_open_afs, &path);
+        touch_dialog_dir_parent(&mut self.last_dir_open_afs, &path, &mut self.gui_state_dirty);
+        let path_for_recent = path.clone();
         match ModWorkspace::open_afs_file(path) {
             Ok(ws) => {
                 let count = ws.afs_entries().len();
+                self.record_recent_afs_open_success(path_for_recent);
                 self.workspace = ws;
                 self.tree_state = AssetTreeState::default();
                 self.preview_state = PreviewState::default();
@@ -300,7 +379,11 @@ impl GvgModdingApp {
         };
         match copy_afs_with_retry(&afs_path, &output_path) {
             Ok(bytes) => {
-                remember_parent_dir(&mut self.last_dir_save_afs_as, &output_path);
+                touch_dialog_dir_parent(
+                    &mut self.last_dir_save_afs_as,
+                    &output_path,
+                    &mut self.gui_state_dirty,
+                );
                 if paths_point_to_same_file(&afs_path, &output_path) {
                     self.status =
                         "Save target is the same file as the open AFS (nothing to copy).".to_owned();
@@ -326,7 +409,7 @@ impl GvgModdingApp {
         let Some(path) = dialog.pick_file() else {
             return;
         };
-        remember_parent_dir(&mut self.last_dir_open_pzz, &path);
+        touch_dialog_dir_parent(&mut self.last_dir_open_pzz, &path, &mut self.gui_state_dirty);
         match ModWorkspace::open_pzz_file(path) {
             Ok(ws) => {
                 self.workspace = ws;

@@ -47,7 +47,7 @@ pub(crate) fn save(state: &PersistedGuiState) -> std::io::Result<()> {
     }
     let tmp = path.with_extension("json.partial");
     let bytes =
-        serde_json::to_vec_pretty(state).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        serde_json::to_vec_pretty(state).map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(tmp, path)?;
     Ok(())

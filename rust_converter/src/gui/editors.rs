@@ -17,6 +17,7 @@ pub struct EditorAction {
     pub status: Option<String>,
     /// When true, show an egui modal with the status text plus bottom status bar copy.
     pub error_modal: bool,
+    pub dirs_changed: bool,
 }
 
 impl EditorAction {
@@ -24,18 +25,37 @@ impl EditorAction {
         Self {
             status: None,
             error_modal: false,
+            dirs_changed: false,
         }
     }
     fn status(msg: String) -> Self {
         Self {
             status: Some(msg),
             error_modal: false,
+            dirs_changed: false,
         }
     }
     fn error(msg: String) -> Self {
         Self {
             status: Some(msg.clone()),
             error_modal: true,
+            dirs_changed: false,
+        }
+    }
+
+    fn status_touch_dirs(msg: String) -> Self {
+        Self {
+            status: Some(msg),
+            error_modal: false,
+            dirs_changed: true,
+        }
+    }
+
+    pub fn accumulate_from(&mut self, other: EditorAction) {
+        self.dirs_changed |= other.dirs_changed;
+        if other.status.is_some() {
+            self.status = other.status;
+            self.error_modal = other.error_modal;
         }
     }
 }
@@ -85,7 +105,7 @@ pub fn show_editor_windows(
             .resizable(true)
             .show(ctx, |ui| {
                 if let Some(result) = show_gim_preview_editor(ui, workspace, stream_index) {
-                    action = result;
+                    action.accumulate_from(result);
                 }
             });
         if !open {
@@ -121,7 +141,7 @@ pub fn show_editor_windows(
                     last_dir_save_pzz_as,
                     last_dir_patch_afs_entry,
                 ) {
-                    action = result;
+                    action.accumulate_from(result);
                 }
             });
         if !open {
@@ -436,7 +456,7 @@ fn save_pzz_dialog(
     {
         Ok(()) => {
             super::remember_parent_dir(last_dir, &path);
-            EditorAction::status(format!("Saved PZZ: {}", path.display()))
+            EditorAction::status_touch_dirs(format!("Saved PZZ: {}", path.display()))
         }
         Err(e) => EditorAction::error(format!("Failed to save PZZ: {e}")),
     }
@@ -474,7 +494,7 @@ fn patch_afs_dialog(
         Ok(patched) => match std::fs::write(&output_path, patched) {
             Ok(()) => {
                 super::remember_parent_dir(last_dir, &output_path);
-                EditorAction::status(format!(
+                EditorAction::status_touch_dirs(format!(
                     "Patched AFS entry {} -> {}",
                     entry_index,
                     output_path.display()
