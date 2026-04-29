@@ -1,6 +1,5 @@
 use crate::{
-    pmf2,
-    pzz,
+    pmf2, pzz,
     texture::GimImage,
     workspace::{AssetKind, EntryValidation, ModWorkspace},
 };
@@ -25,7 +24,11 @@ pub fn show_inspector(
     }
 
     if let Some(entry_index) = selected_afs_entry {
-        if let Some(entry) = workspace.afs_entries().iter().find(|e| e.index == entry_index) {
+        if let Some(entry) = workspace
+            .afs_entries()
+            .iter()
+            .find(|e| e.index == entry_index)
+        {
             show_entry_inspector(ui, entry);
             return;
         }
@@ -139,7 +142,13 @@ fn show_raw_summary(ui: &mut egui::Ui, data: &[u8]) {
         let magic = &data[..4];
         let magic_str = String::from_utf8_lossy(magic)
             .chars()
-            .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '.' })
+            .map(|c| {
+                if c.is_ascii_graphic() || c == ' ' {
+                    c
+                } else {
+                    '.'
+                }
+            })
             .collect::<String>();
         labeled_row(
             ui,

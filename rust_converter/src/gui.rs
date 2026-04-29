@@ -1,8 +1,8 @@
 mod asset_tree;
 mod editors;
 mod fonts;
-mod persist;
 mod inspector;
+mod persist;
 mod preview;
 mod status;
 
@@ -11,8 +11,10 @@ use crate::{
     gpu_renderer::{GpuMesh, GpuRenderer},
     pmf2, pzz,
     render::PreviewState,
+    save::rebuild_pzz_payload,
     workspace::ModWorkspace,
 };
+use anyhow::Result;
 use asset_tree::{AssetTreeState, TreeAction};
 use editors::EditorWindows;
 use eframe::egui;
@@ -81,20 +83,19 @@ pub fn run_native() -> eframe::Result<()> {
 
 impl GvgModdingApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (gpu_renderer, wgpu_state) =
-            if let Some(rs) = cc.wgpu_render_state.as_ref() {
-                let renderer = GpuRenderer::new(&rs.device, &rs.queue);
-                eprintln!("[gui] wgpu renderer initialized");
-                let state = WgpuState {
-                    device: rs.device.clone(),
-                    queue: rs.queue.clone(),
-                    renderer: std::sync::Arc::clone(&rs.renderer),
-                };
-                (Some(renderer), Some(state))
-            } else {
-                eprintln!("[gui] WARNING: no wgpu render state available, 3D preview disabled");
-                (None, None)
+        let (gpu_renderer, wgpu_state) = if let Some(rs) = cc.wgpu_render_state.as_ref() {
+            let renderer = GpuRenderer::new(&rs.device, &rs.queue);
+            eprintln!("[gui] wgpu renderer initialized");
+            let state = WgpuState {
+                device: rs.device.clone(),
+                queue: rs.queue.clone(),
+                renderer: std::sync::Arc::clone(&rs.renderer),
             };
+            (Some(renderer), Some(state))
+        } else {
+            eprintln!("[gui] WARNING: no wgpu render state available, 3D preview disabled");
+            (None, None)
+        };
 
         fonts::install_cjk_fonts(&cc.egui_ctx);
 
@@ -179,6 +180,12 @@ impl eframe::App for GvgModdingApp {
             &mut self.last_dir_patch_afs_entry,
         );
         self.gui_state_dirty |= editor_result.dirs_changed;
+        if editor_result.preview_changed {
+            self.gpu_mesh_stream_index = None;
+            self.gpu_mesh = None;
+            self.gpu_texture_bind_group = None;
+            self.preview_state.camera = None;
+        }
         if let Some(msg) = editor_result.status {
             self.status = msg.clone();
             if editor_result.error_modal {
@@ -309,8 +316,22 @@ impl GvgModdingApp {
                     ui.close();
                 }
                 let has_afs = self.workspace.afs_path().is_some();
-                if ui.add_enabled(has_afs, egui::Button::new("Save AFS As...")).clicked() {
+                if ui
+                    .add_enabled(has_afs, egui::Button::new("Save AFS As..."))
+                    .clicked()
+                {
                     self.save_afs_as_dialog();
+                    ui.close();
+                }
+                let has_dirty_pzz_entries = has_afs && self.workspace.dirty_pzz_entry_count() > 0;
+                if ui
+                    .add_enabled(
+                        has_dirty_pzz_entries,
+                        egui::Button::new("Write All Modified PZZ Entries to AFS..."),
+                    )
+                    .clicked()
+                {
+                    self.save_dirty_pzz_entries_as_dialog();
                     ui.close();
                 }
                 ui.separator();
@@ -337,7 +358,11 @@ impl GvgModdingApp {
     }
 
     fn open_afs_path(&mut self, path: std::path::PathBuf) {
-        touch_dialog_dir_parent(&mut self.last_dir_open_afs, &path, &mut self.gui_state_dirty);
+        touch_dialog_dir_parent(
+            &mut self.last_dir_open_afs,
+            &path,
+            &mut self.gui_state_dirty,
+        );
         let path_for_recent = path.clone();
         match ModWorkspace::open_afs_file(path) {
             Ok(ws) => {
@@ -385,8 +410,8 @@ impl GvgModdingApp {
                     &mut self.gui_state_dirty,
                 );
                 if paths_point_to_same_file(&afs_path, &output_path) {
-                    self.status =
-                        "Save target is the same file as the open AFS (nothing to copy).".to_owned();
+                    self.status = "Save target is the same file as the open AFS (nothing to copy)."
+                        .to_owned();
                     return;
                 }
                 self.status = format!(
@@ -401,6 +426,69 @@ impl GvgModdingApp {
         }
     }
 
+    fn save_dirty_pzz_entries_as_dialog(&mut self) {
+        let Some(afs_path) = self.workspace.afs_path().cloned() else {
+            self.notify_error("No AFS file is open.".to_owned());
+            return;
+        };
+        let dirty_count = self.workspace.dirty_pzz_entry_count();
+        if dirty_count == 0 {
+            self.notify_error("No modified PZZ entries are staged.".to_owned());
+            return;
+        }
+
+        let default_name = afs_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Z_DATA_patched.BIN")
+            .to_string();
+        let mut save_dialog = rfd::FileDialog::new()
+            .add_filter("AFS/BIN", &["bin", "afs"])
+            .set_file_name(&default_name);
+        if let Some(dir) = &self.last_dir_save_afs_as {
+            save_dialog = save_dialog.set_directory(dir);
+        }
+        let Some(output_path) = save_dialog.save_file() else {
+            return;
+        };
+        if paths_point_to_same_file(&afs_path, &output_path) {
+            self.notify_error(
+                "Choose a different output path for batch PZZ write-back.".to_owned(),
+            );
+            return;
+        }
+
+        match build_patched_afs_with_dirty_pzz_entries(&self.workspace, &afs_path).and_then(
+            |patched| {
+                std::fs::write(&output_path, &patched).map_err(anyhow::Error::from)?;
+                Ok(patched.len())
+            },
+        ) {
+            Ok(byte_count) => {
+                touch_dialog_dir_parent(
+                    &mut self.last_dir_save_afs_as,
+                    &output_path,
+                    &mut self.gui_state_dirty,
+                );
+                self.workspace.clear_staged_pzz_and_close();
+                self.tree_state.selected_stream = None;
+                self.preview_state = PreviewState::default();
+                self.gpu_mesh = None;
+                self.gpu_texture_bind_group = None;
+                self.gpu_mesh_stream_index = None;
+                self.status = format!(
+                    "Wrote {} modified PZZ entries ({:.1} MB) -> {}",
+                    dirty_count,
+                    byte_count as f64 / (1024.0 * 1024.0),
+                    output_path.display()
+                );
+            }
+            Err(e) => {
+                self.notify_error(format!("Failed to write modified PZZ entries: {e}"));
+            }
+        }
+    }
+
     fn open_pzz_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new().add_filter("PZZ", &["pzz"]);
         if let Some(dir) = &self.last_dir_open_pzz {
@@ -409,7 +497,11 @@ impl GvgModdingApp {
         let Some(path) = dialog.pick_file() else {
             return;
         };
-        touch_dialog_dir_parent(&mut self.last_dir_open_pzz, &path, &mut self.gui_state_dirty);
+        touch_dialog_dir_parent(
+            &mut self.last_dir_open_pzz,
+            &path,
+            &mut self.gui_state_dirty,
+        );
         match ModWorkspace::open_pzz_file(path) {
             Ok(ws) => {
                 self.workspace = ws;
@@ -432,7 +524,11 @@ impl GvgModdingApp {
                 self.tree_state.selected_stream = None;
             }
             TreeAction::OpenPzz(index) => {
-                eprintln!("[gui] OpenPzz: index={}, currently_expanded={:?}", index, self.workspace.expanded_pzz_entry());
+                eprintln!(
+                    "[gui] OpenPzz: index={}, currently_expanded={:?}",
+                    index,
+                    self.workspace.expanded_pzz_entry()
+                );
                 if self.workspace.expanded_pzz_entry() == Some(index) {
                     self.workspace.close_open_pzz();
                     self.tree_state.selected_stream = None;
@@ -446,11 +542,13 @@ impl GvgModdingApp {
                             .open_pzz()
                             .map(|p| p.streams().len())
                             .unwrap_or(0);
-                        self.status = format!(
-                            "Opened PZZ entry {} ({} streams)",
-                            index, stream_count
+                        self.status =
+                            format!("Opened PZZ entry {} ({} streams)", index, stream_count);
+                        eprintln!(
+                            "[gui]   => OK: {} streams, expanded_pzz_entry={:?}",
+                            stream_count,
+                            self.workspace.expanded_pzz_entry()
                         );
-                        eprintln!("[gui]   => OK: {} streams, expanded_pzz_entry={:?}", stream_count, self.workspace.expanded_pzz_entry());
                     }
                     Err(e) => {
                         self.notify_error(format!("Failed to open PZZ entry {}: {e}", index));
@@ -493,9 +591,6 @@ impl GvgModdingApp {
             }
             TreeAction::OpenHexView(index) => {
                 self.editors.hex_view = Some(index);
-            }
-            TreeAction::OpenSavePlanner => {
-                self.editors.save_planner = true;
             }
         }
     }
@@ -606,14 +701,13 @@ impl GvgModdingApp {
                 return;
             }
         };
-        let new_pmf2 =
-            match pmf2::patch_pmf2_with_mesh_updates(&template_data, &meta, 0.0) {
-                Some(d) => d,
-                None => {
-                    self.notify_error("Failed to patch PMF2 from DAE.".to_owned());
-                    return;
-                }
-            };
+        let new_pmf2 = match pmf2::patch_pmf2_with_mesh_updates(&template_data, &meta, 0.0) {
+            Some(d) => d,
+            None => {
+                self.notify_error("Failed to patch PMF2 from DAE.".to_owned());
+                return;
+            }
+        };
         match self.workspace.replace_stream(stream_index, new_pmf2) {
             Ok(()) => self.status = "Replaced PMF2 stream from DAE".to_string(),
             Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
@@ -769,12 +863,9 @@ impl GvgModdingApp {
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
-                let cam = self
-                    .preview_state
-                    .camera
-                    .get_or_insert_with(|| {
-                        crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds)
-                    });
+                let cam = self.preview_state.camera.get_or_insert_with(|| {
+                    crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds)
+                });
                 cam.zoom((-scroll * 0.001).clamp(-0.5, 0.5));
                 ctx.request_repaint();
             }
@@ -844,6 +935,27 @@ impl GvgModdingApp {
     }
 }
 
+fn build_patched_afs_with_dirty_pzz_entries(
+    workspace: &ModWorkspace,
+    afs_path: &Path,
+) -> Result<Vec<u8>> {
+    let dirty_entries = workspace.dirty_pzz_entries();
+    if dirty_entries.is_empty() {
+        anyhow::bail!("no modified PZZ entries are staged");
+    }
+
+    let mut rebuilt_entries = Vec::with_capacity(dirty_entries.len());
+    for (entry_index, pzz) in dirty_entries {
+        rebuilt_entries.push((entry_index, rebuild_pzz_payload(pzz)?));
+    }
+
+    let mut patched = std::fs::read(afs_path)?;
+    for (entry_index, rebuilt) in rebuilt_entries {
+        patched = afs::patch_entry_bytes(&patched, entry_index, &rebuilt)?;
+    }
+    Ok(patched)
+}
+
 fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -884,20 +996,18 @@ fn copy_via_temp_rename(src: &Path, dst: &Path) -> std::io::Result<u64> {
             "destination has no parent directory",
         )
     })?;
-    let stem = dst
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| std::io::Error::new(
+    let stem = dst.file_name().and_then(|s| s.to_str()).ok_or_else(|| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "destination file name is invalid",
-        ))?;
+        )
+    })?;
     let tmp = parent.join(format!("_gvgafs_partial_{}.{stem}.tmp", std::process::id()));
 
-    let nbytes =
-        std::fs::copy(src, &tmp).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            e
-        })?;
+    let nbytes = std::fs::copy(src, &tmp).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e
+    })?;
 
     #[cfg(windows)]
     if dst.exists() {

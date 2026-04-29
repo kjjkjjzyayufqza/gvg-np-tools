@@ -108,10 +108,7 @@ pub fn scan_inventory_from_file(path: &Path) -> Result<(AfsInventory, u64)> {
         f.read_exact(&mut name_table)?;
     }
 
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(String::from);
+    let file_name = path.file_name().and_then(|s| s.to_str()).map(String::from);
 
     let mut entries = Vec::with_capacity(file_count);
     for index in 0..file_count {
@@ -385,4 +382,62 @@ pub fn patch_entry_bytes(original: &[u8], entry_index: usize, new_data: &[u8]) -
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_u32_le(data: &mut [u8], offset: usize, value: u32) {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn build_afs(entries: &[&[u8]]) -> Vec<u8> {
+        let file_count = entries.len();
+        let mut offsets = Vec::with_capacity(file_count);
+        let mut cursor = 0x800usize;
+        for entry in entries {
+            offsets.push(cursor);
+            cursor += align_up(entry.len(), 2048);
+        }
+
+        let mut data = vec![0u8; cursor];
+        data[0..4].copy_from_slice(b"AFS\0");
+        write_u32_le(&mut data, 4, file_count as u32);
+        for (index, entry) in entries.iter().enumerate() {
+            let table_pos = 8 + index * 8;
+            write_u32_le(&mut data, table_pos, offsets[index] as u32);
+            write_u32_le(&mut data, table_pos + 4, entry.len() as u32);
+            let offset = offsets[index];
+            data[offset..offset + entry.len()].copy_from_slice(entry);
+        }
+        let name_table_pos = 8 + file_count * 8;
+        write_u32_le(&mut data, name_table_pos, 0);
+        write_u32_le(&mut data, name_table_pos + 4, 0);
+        data
+    }
+
+    #[test]
+    fn patch_entry_bytes_can_chain_multiple_entries_in_ascending_order() {
+        let original = build_afs(&[b"entry0-original", b"entry1-original", b"entry2-original"]);
+
+        let patched_once = patch_entry_bytes(&original, 0, b"entry0-updated").unwrap();
+        let patched_twice =
+            patch_entry_bytes(&patched_once, 2, b"entry2-updated-expanded").unwrap();
+
+        let inventory = scan_inventory(&patched_twice, Some("test.bin".to_string())).unwrap();
+        assert_eq!(inventory.entries[0].size, b"entry0-updated".len());
+        assert_eq!(inventory.entries[1].size, b"entry1-original".len());
+        assert_eq!(inventory.entries[2].size, b"entry2-updated-expanded".len());
+        assert_eq!(
+            &patched_twice[inventory.entries[0].offset
+                ..inventory.entries[0].offset + b"entry0-updated".len()],
+            b"entry0-updated"
+        );
+        assert_eq!(
+            &patched_twice[inventory.entries[2].offset
+                ..inventory.entries[2].offset + b"entry2-updated-expanded".len()],
+            b"entry2-updated-expanded"
+        );
+    }
 }

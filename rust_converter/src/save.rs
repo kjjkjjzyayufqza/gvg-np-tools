@@ -1,6 +1,7 @@
 use crate::{
     afs::{AfsInventory, AfsPatchPlan},
     pzz,
+    workspace::PzzWorkspace,
 };
 use anyhow::{bail, Result};
 
@@ -127,6 +128,16 @@ impl PzzSavePlanner {
             rebuilt_pzz,
             validation_messages,
         })
+    }
+}
+
+pub fn rebuild_pzz_payload(pzz: &PzzWorkspace) -> Result<Vec<u8>> {
+    let planner = PzzSavePlanner::new(pzz.original(), pzz.stream_data().to_vec());
+    let original_stream_count = pzz::inspect_pzz(pzz.original())?.stream_count;
+    if original_stream_count == pzz.stream_data().len() {
+        Ok(planner.plan_preserving_layout()?.rebuilt_pzz)
+    } else {
+        Ok(planner.plan_stream_archive_rebuild()?.rebuilt_pzz)
     }
 }
 

@@ -165,11 +165,17 @@ pub fn find_pzz_key(raw: &[u8]) -> Option<u32> {
             off += 4;
         }
         if ok {
-            eprintln!("[pzz] find_pzz_key: found key=0x{:08X} (entry_count={})", key, fc);
+            eprintln!(
+                "[pzz] find_pzz_key: found key=0x{:08X} (entry_count={})",
+                key, fc
+            );
             return Some(key);
         }
     }
-    eprintln!("[pzz] find_pzz_key: no valid key found (raw_w0=0x{:08X})", raw_w0);
+    eprintln!(
+        "[pzz] find_pzz_key: no valid key found (raw_w0=0x{:08X})",
+        raw_w0
+    );
     None
 }
 
@@ -313,13 +319,20 @@ pub fn extract_pzz_streams_strict(raw: &[u8]) -> Result<PzzStreams> {
     let layout = parse_layout(raw).ok_or_else(|| anyhow::anyhow!("failed to parse PZZ layout"))?;
     eprintln!(
         "[pzz]   layout: key=0x{:08X}, descriptors={}, chunks={}, tail_len={}",
-        layout.key, layout.descriptors.len(), layout.chunks.len(), layout.tail.len()
+        layout.key,
+        layout.descriptors.len(),
+        layout.chunks.len(),
+        layout.tail.len()
     );
     for (i, desc) in layout.descriptors.iter().enumerate() {
         let is_stream = desc & 0x4000_0000 != 0;
         let units = (desc & 0x3FFF_FFFF) as usize;
         let chunk_size = layout.chunks.get(i).map(|c| c.len()).unwrap_or(0);
-        let decodable = layout.chunks.get(i).map(|c| decode_stream_chunk(c).is_some()).unwrap_or(false);
+        let decodable = layout
+            .chunks
+            .get(i)
+            .map(|c| decode_stream_chunk(c).is_some())
+            .unwrap_or(false);
         eprintln!(
             "[pzz]     desc[{}]: 0x{:08X} stream_flag={}, units={}, chunk_bytes={}, decodable={}",
             i, desc, is_stream, units, chunk_size, decodable
@@ -334,7 +347,9 @@ pub fn extract_pzz_streams_strict(raw: &[u8]) -> Result<PzzStreams> {
                 let kind = classify_stream(&stream);
                 eprintln!(
                     "[pzz]     decoded chunk[{}]: {} bytes, classify={:?}",
-                    chunk_index, stream.len(), kind
+                    chunk_index,
+                    stream.len(),
+                    kind
                 );
                 streams.push(stream);
             }
@@ -345,7 +360,10 @@ pub fn extract_pzz_streams_strict(raw: &[u8]) -> Result<PzzStreams> {
                 } else {
                     format!("chunk too small: {} bytes", chunk.len())
                 };
-                eprintln!("[pzz]     FAILED to decode chunk[{}]: {}", chunk_index, header);
+                eprintln!(
+                    "[pzz]     FAILED to decode chunk[{}]: {}",
+                    chunk_index, header
+                );
                 bail!("failed to decode PZZ stream chunk {}", chunk_index);
             }
         }

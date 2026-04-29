@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -718,6 +719,42 @@ pub struct Pmf2Meta {
     pub bone_meshes: Vec<BoneMeshMeta>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Pmf2SectionMetadataEdit {
+    pub name: String,
+    pub parent: i32,
+    pub local_matrix: Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Pmf2MetadataEdit {
+    pub bbox: [f32; 3],
+    pub sections: Vec<Pmf2SectionMetadataEdit>,
+}
+
+impl Pmf2MetadataEdit {
+    pub fn from_pmf2(data: &[u8]) -> Result<Self> {
+        if data.len() < 0x20 || &data[..4] != b"PMF2" {
+            bail!("not a PMF2 stream");
+        }
+        let (sections, bbox) = parse_pmf2_sections(data);
+        if sections.is_empty() {
+            bail!("PMF2 contains no editable sections");
+        }
+        Ok(Self {
+            bbox,
+            sections: sections
+                .into_iter()
+                .map(|section| Pmf2SectionMetadataEdit {
+                    name: section.name,
+                    parent: section.parent,
+                    local_matrix: section.local_matrix,
+                })
+                .collect(),
+        })
+    }
+}
+
 const I16_POSITION_SATURATION_RATIO: f32 = 32767.0 / 32768.0;
 
 pub fn compute_auto_bbox_from_bone_meshes(bone_meshes: &[BoneMeshMeta]) -> Option<[f32; 3]> {
@@ -891,8 +928,96 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
 }
 
 pub fn rebuild_pmf2(meta: &Pmf2Meta) -> Vec<u8> {
+    rebuild_pmf2_with_bbox(
+        meta,
+        compute_auto_bbox_from_bone_meshes(&meta.bone_meshes).unwrap_or(meta.bbox),
+    )
+}
+
+pub fn apply_pmf2_metadata_edit(template_pmf2: &[u8], edit: &Pmf2MetadataEdit) -> Result<Vec<u8>> {
+    if template_pmf2.len() < 0x20 || &template_pmf2[..4] != b"PMF2" {
+        bail!("not a PMF2 stream");
+    }
+    validate_pmf2_metadata_edit(edit)?;
+    let (mut sections, _) = parse_pmf2_sections(template_pmf2);
+    if sections.len() != edit.sections.len() {
+        bail!(
+            "metadata edit section count {} does not match PMF2 section count {}",
+            edit.sections.len(),
+            sections.len()
+        );
+    }
+    let (bone_meshes, _, _, _) = extract_per_bone_meshes(template_pmf2, false);
+    for (section, section_edit) in sections.iter_mut().zip(edit.sections.iter()) {
+        section.name = section_edit.name.clone();
+        section.parent = section_edit.parent;
+        section.local_matrix = section_edit.local_matrix.clone();
+    }
+    let mut meta = build_meta("pmf2_metadata_edit", &sections, edit.bbox, &bone_meshes);
+    meta.bbox = edit.bbox;
+    Ok(rebuild_pmf2_with_bbox(&meta, edit.bbox))
+}
+
+fn validate_pmf2_metadata_edit(edit: &Pmf2MetadataEdit) -> Result<()> {
+    if edit.sections.is_empty() {
+        bail!("metadata edit contains no sections");
+    }
+    for (axis, value) in edit.bbox.iter().enumerate() {
+        if !value.is_finite() || *value <= 0.0 {
+            bail!("bbox axis {} must be finite and greater than zero", axis);
+        }
+    }
+    let section_count = edit.sections.len();
+    for (index, section) in edit.sections.iter().enumerate() {
+        if !section.name.is_ascii() || section.name.len() > 15 {
+            bail!("section {} name must fit in 15 ASCII bytes", index);
+        }
+        if section.name.bytes().any(|byte| byte < 0x20 || byte == 0x7F) {
+            bail!("section {} name must not contain control characters", index);
+        }
+        if section.parent < -1 || (section.parent >= 0 && section.parent as usize >= section_count)
+        {
+            bail!(
+                "section {} parent must be -1 or a valid section index",
+                index
+            );
+        }
+        if section.parent == index as i32 {
+            bail!("section {} cannot be its own parent", index);
+        }
+        if section.local_matrix.len() != 16 {
+            bail!("section {} local matrix must contain 16 values", index);
+        }
+        if section.local_matrix.iter().any(|value| !value.is_finite()) {
+            bail!("section {} local matrix values must be finite", index);
+        }
+    }
+    validate_parent_hierarchy_is_acyclic(edit)?;
+    Ok(())
+}
+
+fn validate_parent_hierarchy_is_acyclic(edit: &Pmf2MetadataEdit) -> Result<()> {
+    for start in 0..edit.sections.len() {
+        let mut seen = vec![false; edit.sections.len()];
+        let mut current = start;
+        loop {
+            let parent = edit.sections[current].parent;
+            if parent < 0 {
+                break;
+            }
+            let parent_index = parent as usize;
+            if seen[parent_index] {
+                bail!("section {} parent hierarchy contains a cycle", start);
+            }
+            seen[parent_index] = true;
+            current = parent_index;
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_pmf2_with_bbox(meta: &Pmf2Meta, bbox: [f32; 3]) -> Vec<u8> {
     let num_sec = meta.sections.len();
-    let bbox = compute_auto_bbox_from_bone_meshes(&meta.bone_meshes).unwrap_or(meta.bbox);
 
     let mut section_data_list = Vec::new();
     for sm in &meta.sections {
@@ -1226,6 +1351,130 @@ mod tests {
         let (sections, _) = parse_pmf2_sections(&patched);
         assert_eq!(sections.len(), 1);
         assert!((sections[0].local_matrix[0] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn metadata_edit_rebuild_updates_bbox_name_parent_and_matrix() {
+        let mut matrix = identity();
+        matrix[12] = 1.0;
+        let meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [1.0, 2.0, 3.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0x100,
+                local_matrix: matrix,
+                parent: -1,
+                has_mesh: false,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![],
+        };
+        let pmf2 = rebuild_pmf2(&meta);
+        let mut edit = Pmf2MetadataEdit::from_pmf2(&pmf2).unwrap();
+        edit.bbox = [4.0, 5.0, 6.0];
+        edit.sections[0].name = "renamed".to_string();
+        edit.sections[0].parent = -1;
+        edit.sections[0].local_matrix[12] = 9.0;
+
+        let edited = apply_pmf2_metadata_edit(&pmf2, &edit).unwrap();
+        let (sections, bbox) = parse_pmf2_sections(&edited);
+
+        assert_eq!(bbox, [4.0, 5.0, 6.0]);
+        assert_eq!(sections[0].name, "renamed");
+        assert_eq!(sections[0].parent, -1);
+        assert!((sections[0].local_matrix[12] - 9.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn metadata_edit_rejects_names_that_do_not_fit_pmf2_section_header() {
+        let meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [1.0, 1.0, 1.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0x100,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: false,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![],
+        };
+        let pmf2 = rebuild_pmf2(&meta);
+        let mut edit = Pmf2MetadataEdit::from_pmf2(&pmf2).unwrap();
+        edit.sections[0].name = "this_name_is_too_long".to_string();
+
+        assert!(apply_pmf2_metadata_edit(&pmf2, &edit)
+            .unwrap_err()
+            .to_string()
+            .contains("must fit in 15 ASCII bytes"));
+    }
+
+    #[test]
+    fn metadata_edit_rejects_names_with_embedded_nul() {
+        let meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [1.0, 1.0, 1.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0x100,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: false,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![],
+        };
+        let pmf2 = rebuild_pmf2(&meta);
+        let mut edit = Pmf2MetadataEdit::from_pmf2(&pmf2).unwrap();
+        edit.sections[0].name = "root\0tail".to_string();
+
+        assert!(apply_pmf2_metadata_edit(&pmf2, &edit)
+            .unwrap_err()
+            .to_string()
+            .contains("must not contain control characters"));
+    }
+
+    #[test]
+    fn metadata_edit_rejects_self_parent() {
+        let meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [1.0, 1.0, 1.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0x100,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: false,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![],
+        };
+        let pmf2 = rebuild_pmf2(&meta);
+        let mut edit = Pmf2MetadataEdit::from_pmf2(&pmf2).unwrap();
+        edit.sections[0].parent = 0;
+
+        assert!(apply_pmf2_metadata_edit(&pmf2, &edit)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be its own parent"));
     }
 
     #[test]

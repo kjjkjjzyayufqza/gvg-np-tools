@@ -16,7 +16,6 @@ pub enum TreeAction {
     OpenPmf2Data(usize),
     OpenGimPreview(usize),
     OpenHexView(usize),
-    OpenSavePlanner,
 }
 
 pub struct AssetTreeState {
@@ -69,6 +68,7 @@ pub fn show_asset_tree(
             kind: entry.kind,
             validation: entry.validation,
             is_expanded,
+            dirty: workspace.is_pzz_entry_dirty(entry.index),
         });
         if is_expanded {
             if let Some(streams) = pzz_streams {
@@ -102,7 +102,6 @@ pub fn show_asset_tree(
         }
     }
 
-
     let row_height = 20.0;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -116,10 +115,15 @@ pub fn show_asset_tree(
                         kind,
                         validation,
                         is_expanded,
+                        dirty,
                     } => {
                         let selected = state.selected_afs_entry == Some(*index);
                         let expand_icon = if *kind == AssetKind::Pzz {
-                            if *is_expanded { "▼ " } else { "▶ " }
+                            if *is_expanded {
+                                "▼ "
+                            } else {
+                                "▶ "
+                            }
                         } else {
                             "  "
                         };
@@ -129,13 +133,15 @@ pub fn show_asset_tree(
                             EntryValidation::ExceedsBounds => "⚠ ",
                             EntryValidation::Overlapping => "⚠ ",
                         };
+                        let dirty_mark = if *dirty { " *" } else { "" };
                         let label = format!(
-                            "{}{}#{:04} {} ({})",
+                            "{}{}#{:04} {} ({}){}",
                             validation_icon,
                             expand_icon,
                             index,
                             name,
-                            format_size(*size)
+                            format_size(*size),
+                            dirty_mark
                         );
                         let response = ui.selectable_label(selected, label);
                         if response.clicked() {
@@ -280,6 +286,7 @@ enum TreeRow {
         kind: AssetKind,
         validation: EntryValidation,
         is_expanded: bool,
+        dirty: bool,
     },
     Stream {
         index: usize,

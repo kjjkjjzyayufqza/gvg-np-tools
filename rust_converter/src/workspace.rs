@@ -1,8 +1,9 @@
 use crate::{
-    afs::{self, AfsEntry, AfsInventory},
+    afs::{self, AfsEntry},
     pzz,
 };
 use anyhow::{bail, Result};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,10 +55,9 @@ pub struct PzzWorkspace {
 pub struct ModWorkspace {
     afs_path: Option<PathBuf>,
     afs_bytes: Option<Vec<u8>>,
-    afs_file_len: u64,
-    inventory: Option<AfsInventory>,
     afs_entries: Vec<AfsEntryNode>,
     open_pzz: Option<PzzWorkspace>,
+    staged_pzz: BTreeMap<usize, PzzWorkspace>,
     expanded_pzz_entry: Option<usize>,
     operations: Vec<String>,
 }
@@ -73,7 +73,10 @@ impl ModWorkspace {
             .map(|entry| entry_to_node(&entry, file_len))
             .collect::<Vec<_>>();
         let count = afs_entries.len();
-        let pzz_count = afs_entries.iter().filter(|e| e.kind == AssetKind::Pzz).count();
+        let pzz_count = afs_entries
+            .iter()
+            .filter(|e| e.kind == AssetKind::Pzz)
+            .count();
         let empty_count = afs_entries
             .iter()
             .filter(|e| e.validation == EntryValidation::Empty)
@@ -89,10 +92,9 @@ impl ModWorkspace {
         Ok(Self {
             afs_path: Some(path),
             afs_bytes: None,
-            afs_file_len: file_len,
-            inventory: Some(inventory),
             afs_entries,
             open_pzz: None,
+            staged_pzz: BTreeMap::new(),
             expanded_pzz_entry: None,
             operations: vec![format!("Loaded AFS ({} entries)", count)],
         })
@@ -114,10 +116,9 @@ impl ModWorkspace {
         Ok(Self {
             afs_path: None,
             afs_bytes: None,
-            afs_file_len: 0,
-            inventory: None,
             afs_entries: Vec::new(),
             open_pzz: Some(pzz),
+            staged_pzz: BTreeMap::new(),
             expanded_pzz_entry: None,
             operations: vec![format!("Loaded PZZ {}", name)],
         })
@@ -137,10 +138,9 @@ impl ModWorkspace {
         Ok(Self {
             afs_path: None,
             afs_bytes: Some(data),
-            afs_file_len: file_len,
-            inventory: Some(inventory),
             afs_entries,
             open_pzz: None,
+            staged_pzz: BTreeMap::new(),
             expanded_pzz_entry: None,
             operations: vec![format!("Loaded AFS ({} entries)", count)],
         })
@@ -162,6 +162,43 @@ impl ModWorkspace {
         self.expanded_pzz_entry
     }
 
+    pub fn staged_dirty_pzz_entry_count(&self) -> usize {
+        self.staged_pzz
+            .values()
+            .filter(|pzz| pzz.is_dirty())
+            .count()
+    }
+
+    pub fn is_pzz_entry_dirty(&self, entry_index: usize) -> bool {
+        if self.expanded_pzz_entry == Some(entry_index) {
+            return self.open_pzz.as_ref().is_some_and(PzzWorkspace::is_dirty);
+        }
+        self.staged_pzz
+            .get(&entry_index)
+            .is_some_and(PzzWorkspace::is_dirty)
+    }
+
+    pub fn dirty_pzz_entries(&self) -> Vec<(usize, &PzzWorkspace)> {
+        let mut entries = self
+            .staged_pzz
+            .iter()
+            .filter_map(|(entry_index, pzz)| pzz.is_dirty().then_some((*entry_index, pzz)))
+            .collect::<Vec<_>>();
+        if let Some(pzz) = self.open_pzz.as_ref() {
+            if let Some(entry_index) = pzz.afs_entry_index() {
+                if pzz.is_dirty() && !entries.iter().any(|(index, _)| *index == entry_index) {
+                    entries.push((entry_index, pzz));
+                }
+            }
+        }
+        entries.sort_by_key(|(entry_index, _)| *entry_index);
+        entries
+    }
+
+    pub fn dirty_pzz_entry_count(&self) -> usize {
+        self.dirty_pzz_entries().len()
+    }
+
     pub fn operation_log(&self) -> &[String] {
         &self.operations
     }
@@ -172,6 +209,9 @@ impl ModWorkspace {
 
     pub fn open_pzz_entry(&mut self, entry_index: usize) -> Result<()> {
         eprintln!("[workspace] open_pzz_entry: index={}", entry_index);
+        if self.expanded_pzz_entry == Some(entry_index) {
+            return Ok(());
+        }
         let entry = self
             .afs_entries
             .iter()
@@ -191,22 +231,34 @@ impl ModWorkspace {
         let name = entry.name.clone();
         let offset = entry.offset;
         let size = entry.size;
-        let data = if let Some(afs_path) = self.afs_path.as_ref() {
-            eprintln!("[workspace]   reading from file: offset=0x{:X}, size={}", offset, size);
-            afs::read_entry_from_file(afs_path, offset, size)?
-        } else if let Some(afs_bytes) = self.afs_bytes.as_ref() {
-            let end = offset
-                .checked_add(size)
-                .ok_or_else(|| anyhow::anyhow!("entry size overflow"))?;
-            if end > afs_bytes.len() {
-                bail!("AFS entry {} exceeds data bounds", entry_index);
-            }
-            afs_bytes[offset..end].to_vec()
+        let pzz_ws = if let Some(pzz) = self.staged_pzz.remove(&entry_index) {
+            eprintln!("[workspace]   restoring staged PZZ entry {}", entry_index);
+            pzz
         } else {
-            bail!("no AFS source available");
+            let data = if let Some(afs_path) = self.afs_path.as_ref() {
+                eprintln!(
+                    "[workspace]   reading from file: offset=0x{:X}, size={}",
+                    offset, size
+                );
+                afs::read_entry_from_file(afs_path, offset, size)?
+            } else if let Some(afs_bytes) = self.afs_bytes.as_ref() {
+                let end = offset
+                    .checked_add(size)
+                    .ok_or_else(|| anyhow::anyhow!("entry size overflow"))?;
+                if end > afs_bytes.len() {
+                    bail!("AFS entry {} exceeds data bounds", entry_index);
+                }
+                afs_bytes[offset..end].to_vec()
+            } else {
+                bail!("no AFS source available");
+            };
+            eprintln!(
+                "[workspace]   raw data read: {} bytes, first_4={:02X?}",
+                data.len(),
+                &data[..data.len().min(4)]
+            );
+            PzzWorkspace::new(name.clone(), Some(entry_index), data)?
         };
-        eprintln!("[workspace]   raw data read: {} bytes, first_4={:02X?}", data.len(), &data[..data.len().min(4)]);
-        let pzz_ws = PzzWorkspace::new(name.clone(), Some(entry_index), data)?;
         eprintln!(
             "[workspace]   PZZ opened: {} streams",
             pzz_ws.streams().len()
@@ -217,6 +269,7 @@ impl ModWorkspace {
                 i, node.name, node.kind, node.size
             );
         }
+        self.stash_open_pzz_if_dirty();
         self.open_pzz = Some(pzz_ws);
         self.expanded_pzz_entry = Some(entry_index);
         self.operations
@@ -225,7 +278,16 @@ impl ModWorkspace {
     }
 
     pub fn close_open_pzz(&mut self) {
-        eprintln!("[workspace] close_open_pzz (was entry {:?})", self.expanded_pzz_entry);
+        eprintln!(
+            "[workspace] close_open_pzz (was entry {:?})",
+            self.expanded_pzz_entry
+        );
+        self.stash_open_pzz_if_dirty();
+        self.expanded_pzz_entry = None;
+    }
+
+    pub fn clear_staged_pzz_and_close(&mut self) {
+        self.staged_pzz.clear();
         self.open_pzz = None;
         self.expanded_pzz_entry = None;
     }
@@ -239,16 +301,43 @@ impl ModWorkspace {
         self.operations.push(format!("Replaced stream{:03}", index));
         Ok(())
     }
+
+    fn stash_open_pzz_if_dirty(&mut self) {
+        let Some(pzz) = self.open_pzz.take() else {
+            return;
+        };
+        if let Some(entry_index) = pzz.afs_entry_index() {
+            if pzz.is_dirty() {
+                self.staged_pzz.insert(entry_index, pzz);
+                return;
+            }
+        }
+        self.open_pzz = None;
+    }
 }
 
 impl PzzWorkspace {
     pub fn new(name: String, afs_entry_index: Option<usize>, original: Vec<u8>) -> Result<Self> {
-        eprintln!("[pzz_ws] PzzWorkspace::new: name={:?}, afs_entry={:?}, raw_len={}", name, afs_entry_index, original.len());
+        eprintln!(
+            "[pzz_ws] PzzWorkspace::new: name={:?}, afs_entry={:?}, raw_len={}",
+            name,
+            afs_entry_index,
+            original.len()
+        );
         let result = pzz::extract_pzz_streams_strict(&original);
         match &result {
             Ok(pzz_streams) => {
-                eprintln!("[pzz_ws]   extract_pzz_streams_strict OK: {} streams, key=0x{:08X}", pzz_streams.streams.len(), pzz_streams.info.key);
-                eprintln!("[pzz_ws]   info: descriptors={}, chunks={}, has_tail={}", pzz_streams.info.descriptor_count, pzz_streams.info.chunk_count, pzz_streams.info.has_tail);
+                eprintln!(
+                    "[pzz_ws]   extract_pzz_streams_strict OK: {} streams, key=0x{:08X}",
+                    pzz_streams.streams.len(),
+                    pzz_streams.info.key
+                );
+                eprintln!(
+                    "[pzz_ws]   info: descriptors={}, chunks={}, has_tail={}",
+                    pzz_streams.info.descriptor_count,
+                    pzz_streams.info.chunk_count,
+                    pzz_streams.info.has_tail
+                );
                 for (i, s) in pzz_streams.streams.iter().enumerate() {
                     let kind = pzz::classify_stream(s);
                     let magic_hex = if s.len() >= 4 {
@@ -256,7 +345,13 @@ impl PzzWorkspace {
                     } else {
                         format!("{:02X?}", &s[..s.len().min(4)])
                     };
-                    eprintln!("[pzz_ws]     stream[{}]: size={}, classify={:?}, magic=[{}]", i, s.len(), kind, magic_hex);
+                    eprintln!(
+                        "[pzz_ws]     stream[{}]: size={}, classify={:?}, magic=[{}]",
+                        i,
+                        s.len(),
+                        kind,
+                        magic_hex
+                    );
                 }
             }
             Err(e) => {
@@ -366,5 +461,68 @@ fn stream_kind(data: &[u8]) -> AssetKind {
         "gim" => AssetKind::Gim,
         "sad" => AssetKind::Sad,
         _ => AssetKind::Raw,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_u32_le(data: &mut [u8], offset: usize, value: u32) {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn align_up(value: usize, alignment: usize) -> usize {
+        (value + alignment - 1) & !(alignment - 1)
+    }
+
+    fn build_afs(entries: &[Vec<u8>]) -> Vec<u8> {
+        let file_count = entries.len();
+        let mut offsets = Vec::with_capacity(file_count);
+        let mut cursor = 0x800usize;
+        for entry in entries {
+            offsets.push(cursor);
+            cursor += align_up(entry.len(), 2048);
+        }
+
+        let mut data = vec![0u8; cursor];
+        data[0..4].copy_from_slice(b"AFS\0");
+        write_u32_le(&mut data, 4, file_count as u32);
+        for (index, entry) in entries.iter().enumerate() {
+            let table_pos = 8 + index * 8;
+            write_u32_le(&mut data, table_pos, offsets[index] as u32);
+            write_u32_le(&mut data, table_pos + 4, entry.len() as u32);
+            let offset = offsets[index];
+            data[offset..offset + entry.len()].copy_from_slice(entry);
+        }
+        let name_table_pos = 8 + file_count * 8;
+        write_u32_le(&mut data, name_table_pos, 0);
+        write_u32_le(&mut data, name_table_pos + 4, 0);
+        data
+    }
+
+    #[test]
+    fn switching_pzz_entries_stages_dirty_workspace_and_restores_it() {
+        let pzz0 = pzz::build_pzz(&[b"PMF2_entry0".to_vec()], 0x1234_5678);
+        let pzz1 = pzz::build_pzz(&[b"PMF2_entry1".to_vec()], 0x1234_5678);
+        let afs = build_afs(&[pzz0, pzz1]);
+        let mut workspace = ModWorkspace::open_afs_bytes("test.bin", afs).unwrap();
+
+        workspace.open_pzz_entry(0).unwrap();
+        workspace
+            .replace_stream(0, b"PMF2_entry0_modified".to_vec())
+            .unwrap();
+        workspace.open_pzz_entry(1).unwrap();
+
+        assert_eq!(workspace.expanded_pzz_entry(), Some(1));
+        assert_eq!(workspace.staged_dirty_pzz_entry_count(), 1);
+        assert!(workspace.is_pzz_entry_dirty(0));
+        assert!(!workspace.is_pzz_entry_dirty(1));
+
+        workspace.open_pzz_entry(0).unwrap();
+        let open = workspace.open_pzz().unwrap();
+        assert_eq!(open.stream_data()[0], b"PMF2_entry0_modified");
+        assert!(open.is_dirty());
+        assert_eq!(workspace.staged_dirty_pzz_entry_count(), 0);
     }
 }

@@ -1,4 +1,9 @@
-use crate::{pmf2, pzz, save::{PzzSavePlan, PzzSavePlanner}, texture::GimImage, workspace::ModWorkspace};
+use crate::{
+    pmf2, pzz,
+    save::{rebuild_pzz_payload, PzzSavePlan, PzzSavePlanner},
+    texture::GimImage,
+    workspace::ModWorkspace,
+};
 use anyhow::Result;
 use eframe::egui;
 use std::path::PathBuf;
@@ -10,7 +15,14 @@ pub struct EditorWindows {
     pub gim_preview: Option<usize>,
     pub hex_view: Option<usize>,
     pub save_planner: bool,
+    pmf2_metadata_state: Option<Pmf2MetadataEditorState>,
     cached_save_plan: Option<Result<PzzSavePlan, String>>,
+}
+
+#[derive(Clone, Debug)]
+struct Pmf2MetadataEditorState {
+    stream_index: usize,
+    edit: pmf2::Pmf2MetadataEdit,
 }
 
 pub struct EditorAction {
@@ -18,6 +30,7 @@ pub struct EditorAction {
     /// When true, show an egui modal with the status text plus bottom status bar copy.
     pub error_modal: bool,
     pub dirs_changed: bool,
+    pub preview_changed: bool,
 }
 
 impl EditorAction {
@@ -26,6 +39,7 @@ impl EditorAction {
             status: None,
             error_modal: false,
             dirs_changed: false,
+            preview_changed: false,
         }
     }
     fn status(msg: String) -> Self {
@@ -33,6 +47,7 @@ impl EditorAction {
             status: Some(msg),
             error_modal: false,
             dirs_changed: false,
+            preview_changed: false,
         }
     }
     fn error(msg: String) -> Self {
@@ -40,6 +55,7 @@ impl EditorAction {
             status: Some(msg.clone()),
             error_modal: true,
             dirs_changed: false,
+            preview_changed: false,
         }
     }
 
@@ -48,11 +64,22 @@ impl EditorAction {
             status: Some(msg),
             error_modal: false,
             dirs_changed: true,
+            preview_changed: false,
+        }
+    }
+
+    fn status_preview_changed(msg: String) -> Self {
+        Self {
+            status: Some(msg),
+            error_modal: false,
+            dirs_changed: false,
+            preview_changed: true,
         }
     }
 
     pub fn accumulate_from(&mut self, other: EditorAction) {
         self.dirs_changed |= other.dirs_changed;
+        self.preview_changed |= other.preview_changed;
         if other.status.is_some() {
             self.status = other.status;
             self.error_modal = other.error_modal;
@@ -76,10 +103,18 @@ pub fn show_editor_windows(
             .default_size([560.0, 400.0])
             .resizable(true)
             .show(ctx, |ui| {
-                show_pmf2_metadata_editor(ui, workspace, stream_index);
+                if let Some(result) = show_pmf2_metadata_editor(
+                    ui,
+                    workspace,
+                    stream_index,
+                    &mut editors.pmf2_metadata_state,
+                ) {
+                    action.accumulate_from(result);
+                }
             });
         if !open {
             editors.pmf2_metadata = None;
+            editors.pmf2_metadata_state = None;
         }
     }
 
@@ -160,35 +195,129 @@ fn get_stream_data<'a>(workspace: &'a ModWorkspace, index: usize) -> Option<&'a 
         .map(Vec::as_slice)
 }
 
-fn show_pmf2_metadata_editor(ui: &mut egui::Ui, workspace: &ModWorkspace, stream_index: usize) {
-    let Some(data) = get_stream_data(workspace, stream_index) else {
+fn show_pmf2_metadata_editor(
+    ui: &mut egui::Ui,
+    workspace: &mut ModWorkspace,
+    stream_index: usize,
+    state: &mut Option<Pmf2MetadataEditorState>,
+) -> Option<EditorAction> {
+    let Some(data) = get_stream_data(workspace, stream_index).map(Vec::from) else {
         ui.label("Stream not available.");
-        return;
+        return None;
     };
-    if pzz::classify_stream(data) != "pmf2" {
+    if pzz::classify_stream(&data) != "pmf2" {
         ui.label("Not a PMF2 stream.");
-        return;
+        return None;
     }
-    let (sections, bbox) = pmf2::parse_pmf2_sections(data);
-    ui.label(format!(
-        "BBox scale: {:.6}, {:.6}, {:.6}",
-        bbox[0], bbox[1], bbox[2]
-    ));
-    ui.label(format!("Sections: {}", sections.len()));
+
+    if state
+        .as_ref()
+        .is_none_or(|current| current.stream_index != stream_index)
+    {
+        match pmf2::Pmf2MetadataEdit::from_pmf2(&data) {
+            Ok(edit) => {
+                *state = Some(Pmf2MetadataEditorState { stream_index, edit });
+            }
+            Err(e) => {
+                ui.label(format!("PMF2 metadata parse failed: {e}"));
+                return None;
+            }
+        }
+    }
+
+    let Some(editor_state) = state.as_mut() else {
+        ui.label("PMF2 metadata editor state is unavailable.");
+        return None;
+    };
+
+    ui.horizontal(|ui| {
+        ui.label("BBox scale:");
+        for axis in 0..3 {
+            ui.add(
+                egui::DragValue::new(&mut editor_state.edit.bbox[axis])
+                    .speed(0.01)
+                    .range(0.000001..=f32::MAX),
+            );
+        }
+    });
+    ui.label(format!("Sections: {}", editor_state.edit.sections.len()));
     ui.separator();
+
+    let section_count = editor_state.edit.sections.len();
     egui::ScrollArea::both().show(ui, |ui| {
         ui.set_min_width(500.0);
-        for section in sections {
-            ui.collapsing(&section.name, |ui| {
-                ui.monospace(format!("Index: {}", section.index));
-                ui.monospace(format!("Parent: {}", section.parent));
-                ui.monospace(format!("Has mesh: {}", section.has_mesh));
-                ui.monospace(format!("Offset: 0x{:X}", section.offset));
-                ui.monospace(format!("Size: {}", section.size));
-                ui.monospace(format!("Category: {}", section.category));
+        for (index, section) in editor_state.edit.sections.iter_mut().enumerate() {
+            let title = format!("#{:03} {}", index, section.name);
+            ui.collapsing(title, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut section.name);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Parent");
+                    ui.add(
+                        egui::DragValue::new(&mut section.parent)
+                            .speed(1)
+                            .range(-1..=(section_count as i32 - 1)),
+                    );
+                });
+                ui.label("Local matrix");
+                egui::Grid::new(format!("pmf2_matrix_{}_{}", stream_index, index))
+                    .num_columns(4)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        for row in 0..4 {
+                            for col in 0..4 {
+                                let matrix_index = row * 4 + col;
+                                ui.add(
+                                    egui::DragValue::new(&mut section.local_matrix[matrix_index])
+                                        .speed(0.001),
+                                );
+                            }
+                            ui.end_row();
+                        }
+                    });
             });
         }
     });
+
+    ui.separator();
+    let mut result = None;
+    ui.horizontal(|ui| {
+        if ui.button("Apply Metadata Changes").clicked() {
+            result = Some(
+                match pmf2::apply_pmf2_metadata_edit(&data, &editor_state.edit) {
+                    Ok(rebuilt) => match workspace.replace_stream(stream_index, rebuilt) {
+                        Ok(()) => EditorAction::status_preview_changed(format!(
+                            "Updated PMF2 metadata for stream{:03}",
+                            stream_index
+                        )),
+                        Err(e) => {
+                            EditorAction::error(format!("Failed to replace PMF2 stream: {e}"))
+                        }
+                    },
+                    Err(e) => EditorAction::error(format!("PMF2 metadata edit failed: {e}")),
+                },
+            );
+        }
+        if ui.button("Reset").clicked() {
+            match pmf2::Pmf2MetadataEdit::from_pmf2(&data) {
+                Ok(edit) => {
+                    editor_state.edit = edit;
+                    result = Some(EditorAction::status(format!(
+                        "Reset PMF2 metadata editor for stream{:03}",
+                        stream_index
+                    )));
+                }
+                Err(e) => {
+                    result = Some(EditorAction::error(format!(
+                        "Failed to reset PMF2 metadata editor: {e}"
+                    )));
+                }
+            }
+        }
+    });
+    result
 }
 
 fn show_pmf2_data_viewer(ui: &mut egui::Ui, workspace: &ModWorkspace, stream_index: usize) {
@@ -428,19 +557,10 @@ fn plan_pzz_save(workspace: &ModWorkspace) -> Result<Vec<u8>> {
     let pzz = workspace
         .open_pzz()
         .ok_or_else(|| anyhow::anyhow!("no PZZ is open"))?;
-    let planner = PzzSavePlanner::new(pzz.original(), pzz.stream_data().to_vec());
-    let original_stream_count = pzz::inspect_pzz(pzz.original())?.stream_count;
-    if original_stream_count == pzz.stream_data().len() {
-        Ok(planner.plan_preserving_layout()?.rebuilt_pzz)
-    } else {
-        Ok(planner.plan_stream_archive_rebuild()?.rebuilt_pzz)
-    }
+    rebuild_pzz_payload(pzz)
 }
 
-fn save_pzz_dialog(
-    workspace: &ModWorkspace,
-    last_dir: &mut Option<PathBuf>,
-) -> EditorAction {
+fn save_pzz_dialog(workspace: &ModWorkspace, last_dir: &mut Option<PathBuf>) -> EditorAction {
     let Some(pzz) = workspace.open_pzz() else {
         return EditorAction::error("No PZZ is open.".to_string());
     };
@@ -462,10 +582,7 @@ fn save_pzz_dialog(
     }
 }
 
-fn patch_afs_dialog(
-    workspace: &ModWorkspace,
-    last_dir: &mut Option<PathBuf>,
-) -> EditorAction {
+fn patch_afs_dialog(workspace: &ModWorkspace, last_dir: &mut Option<PathBuf>) -> EditorAction {
     let Some(afs_path) = workspace.afs_path() else {
         return EditorAction::error("No AFS file is open.".to_string());
     };

@@ -63,9 +63,7 @@ impl GpuRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh_shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("shaders/mesh.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mesh.wgsl").into()),
         });
 
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -165,19 +163,15 @@ impl GpuRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh_pipeline_layout"),
-            bind_group_layouts: &[
-                &uniform_bind_group_layout,
-                &texture_bind_group_layout,
-            ],
+            bind_group_layouts: &[&uniform_bind_group_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
-        let line_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("line_pipeline_layout"),
-                bind_group_layouts: &[&uniform_bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let line_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("line_pipeline_layout"),
+            bind_group_layouts: &[&uniform_bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
         let depth_stencil = Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth24Plus,
@@ -423,7 +417,10 @@ impl GpuRenderer {
         if self.viewport_size == [w, h] {
             return;
         }
-        eprintln!("[gpu] ensure_viewport: {}x{} (was {:?})", w, h, self.viewport_size);
+        eprintln!(
+            "[gpu] ensure_viewport: {}x{} (was {:?})",
+            w, h, self.viewport_size
+        );
         self.viewport_size = [w, h];
 
         let color_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -462,11 +459,8 @@ impl GpuRenderer {
             egui_renderer.free_texture(&old_id);
         }
 
-        let texture_id = egui_renderer.register_native_texture(
-            device,
-            &color_view,
-            wgpu::FilterMode::Linear,
-        );
+        let texture_id =
+            egui_renderer.register_native_texture(device, &color_view, wgpu::FilterMode::Linear);
         eprintln!("[gpu] registered egui texture: {:?}", texture_id);
 
         self.color_texture = Some(color_texture);
@@ -638,12 +632,30 @@ fn build_wireframe_indices(tri_index_count: u32) -> Vec<u32> {
 fn create_axis_lines(device: &wgpu::Device) -> GpuLineMesh {
     let len = 1.0_f32;
     let verts = [
-        LineVertex { position: [0.0, 0.0, 0.0], color: [1.0, 0.2, 0.2, 1.0] },
-        LineVertex { position: [len, 0.0, 0.0], color: [1.0, 0.2, 0.2, 1.0] },
-        LineVertex { position: [0.0, 0.0, 0.0], color: [0.2, 1.0, 0.2, 1.0] },
-        LineVertex { position: [0.0, len, 0.0], color: [0.2, 1.0, 0.2, 1.0] },
-        LineVertex { position: [0.0, 0.0, 0.0], color: [0.2, 0.2, 1.0, 1.0] },
-        LineVertex { position: [0.0, 0.0, len], color: [0.2, 0.2, 1.0, 1.0] },
+        LineVertex {
+            position: [0.0, 0.0, 0.0],
+            color: [1.0, 0.2, 0.2, 1.0],
+        },
+        LineVertex {
+            position: [len, 0.0, 0.0],
+            color: [1.0, 0.2, 0.2, 1.0],
+        },
+        LineVertex {
+            position: [0.0, 0.0, 0.0],
+            color: [0.2, 1.0, 0.2, 1.0],
+        },
+        LineVertex {
+            position: [0.0, len, 0.0],
+            color: [0.2, 1.0, 0.2, 1.0],
+        },
+        LineVertex {
+            position: [0.0, 0.0, 0.0],
+            color: [0.2, 0.2, 1.0, 1.0],
+        },
+        LineVertex {
+            position: [0.0, 0.0, len],
+            color: [0.2, 0.2, 1.0, 1.0],
+        },
     ];
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("axis_vb"),
@@ -666,10 +678,22 @@ fn create_ground_grid(device: &wgpu::Device) -> GpuLineMesh {
     for i in -n..=n {
         let pos = i as f32 * step;
         let color = if i % 5 == 0 { color_major } else { color_minor };
-        verts.push(LineVertex { position: [pos, 0.0, -extent], color });
-        verts.push(LineVertex { position: [pos, 0.0, extent], color });
-        verts.push(LineVertex { position: [-extent, 0.0, pos], color });
-        verts.push(LineVertex { position: [extent, 0.0, pos], color });
+        verts.push(LineVertex {
+            position: [pos, 0.0, -extent],
+            color,
+        });
+        verts.push(LineVertex {
+            position: [pos, 0.0, extent],
+            color,
+        });
+        verts.push(LineVertex {
+            position: [-extent, 0.0, pos],
+            color,
+        });
+        verts.push(LineVertex {
+            position: [extent, 0.0, pos],
+            color,
+        });
     }
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("grid_vb"),
