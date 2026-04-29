@@ -5,13 +5,22 @@ mod preview;
 mod status;
 
 use crate::{
-    afs, dae, pmf2, pzz,
+    afs, dae,
+    gpu_renderer::{GpuMesh, GpuRenderer},
+    pmf2, pzz,
     render::PreviewState,
     workspace::ModWorkspace,
 };
 use asset_tree::{AssetTreeState, TreeAction};
 use editors::EditorWindows;
 use eframe::egui;
+use eframe::egui_wgpu::wgpu;
+
+pub struct WgpuState {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub renderer: std::sync::Arc<egui::mutex::RwLock<eframe::egui_wgpu::Renderer>>,
+}
 
 pub struct GvgModdingApp {
     workspace: ModWorkspace,
@@ -21,6 +30,11 @@ pub struct GvgModdingApp {
     status: String,
     show_left_panel: bool,
     show_right_panel: bool,
+    gpu_renderer: Option<GpuRenderer>,
+    gpu_mesh: Option<GpuMesh>,
+    gpu_texture_bind_group: Option<wgpu::BindGroup>,
+    gpu_mesh_stream_index: Option<usize>,
+    wgpu_state: Option<WgpuState>,
 }
 
 pub fn run_native() -> eframe::Result<()> {
@@ -34,12 +48,27 @@ pub fn run_native() -> eframe::Result<()> {
     eframe::run_native(
         "GVG Modding Tool",
         options,
-        Box::new(|_cc| Ok(Box::new(GvgModdingApp::default()))),
+        Box::new(|cc| Ok(Box::new(GvgModdingApp::new(cc)))),
     )
 }
 
-impl Default for GvgModdingApp {
-    fn default() -> Self {
+impl GvgModdingApp {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let (gpu_renderer, wgpu_state) =
+            if let Some(rs) = cc.wgpu_render_state.as_ref() {
+                let renderer = GpuRenderer::new(&rs.device, &rs.queue);
+                eprintln!("[gui] wgpu renderer initialized");
+                let state = WgpuState {
+                    device: rs.device.clone(),
+                    queue: rs.queue.clone(),
+                    renderer: std::sync::Arc::clone(&rs.renderer),
+                };
+                (Some(renderer), Some(state))
+            } else {
+                eprintln!("[gui] WARNING: no wgpu render state available, 3D preview disabled");
+                (None, None)
+            };
+
         Self {
             workspace: ModWorkspace::default(),
             tree_state: AssetTreeState::default(),
@@ -48,6 +77,11 @@ impl Default for GvgModdingApp {
             status: "Ready".to_string(),
             show_left_panel: true,
             show_right_panel: true,
+            gpu_renderer,
+            gpu_mesh: None,
+            gpu_texture_bind_group: None,
+            gpu_mesh_stream_index: None,
+            wgpu_state,
         }
     }
 }
@@ -89,13 +123,10 @@ impl eframe::App for GvgModdingApp {
                 });
         }
 
+        self.update_gpu_mesh();
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            preview::show_preview(
-                ui,
-                &self.workspace,
-                self.tree_state.selected_stream,
-                &mut self.preview_state,
-            );
+            self.show_3d_preview(ui, ctx);
         });
 
         let editor_result =
@@ -185,12 +216,15 @@ impl GvgModdingApp {
     fn handle_tree_action(&mut self, action: TreeAction) {
         match action {
             TreeAction::SelectAfsEntry(index) => {
+                eprintln!("[gui] SelectAfsEntry: index={}", index);
                 self.tree_state.selected_afs_entry = Some(index);
                 self.tree_state.selected_stream = None;
             }
             TreeAction::OpenPzz(index) => {
+                eprintln!("[gui] OpenPzz: index={}, currently_expanded={:?}", index, self.workspace.expanded_pzz_entry());
                 if self.workspace.expanded_pzz_entry() == Some(index) {
                     self.workspace.close_open_pzz();
+                    self.tree_state.selected_stream = None;
                     self.status = "Closed PZZ".to_string();
                     return;
                 }
@@ -205,15 +239,19 @@ impl GvgModdingApp {
                             "Opened PZZ entry {} ({} streams)",
                             index, stream_count
                         );
+                        eprintln!("[gui]   => OK: {} streams, expanded_pzz_entry={:?}", stream_count, self.workspace.expanded_pzz_entry());
                     }
                     Err(e) => {
                         self.status = format!("Failed to open PZZ entry {}: {e}", index);
+                        eprintln!("[gui]   => FAILED: {}", e);
                     }
                 }
             }
             TreeAction::SelectStream(index) => {
+                eprintln!("[gui] SelectStream: index={}", index);
                 self.tree_state.selected_stream = Some(index);
                 self.preview_state.camera = None;
+                self.gpu_mesh_stream_index = None;
             }
             TreeAction::ExportEntryRaw(index) => {
                 self.export_entry_raw(index);
@@ -446,5 +484,151 @@ impl GvgModdingApp {
             .open_pzz()
             .and_then(|pzz| pzz.stream_data().get(index))
             .map(Vec::as_slice)
+    }
+
+    fn show_3d_preview(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(gpu_mesh) = self.gpu_mesh.as_ref() else {
+            ui.centered_and_justified(|ui| {
+                ui.label("Select a PMF2 stream to preview.");
+            });
+            return;
+        };
+
+        let rs = match &self.wgpu_state {
+            Some(rs) => rs,
+            None => {
+                ui.centered_and_justified(|ui| {
+                    ui.label("3D preview unavailable (no wgpu).");
+                });
+                return;
+            }
+        };
+        let renderer = match &mut self.gpu_renderer {
+            Some(r) => r,
+            None => return,
+        };
+
+        preview::preview_controls(ui, gpu_mesh, &mut self.preview_state);
+
+        let available = ui.available_size();
+        let vw = (available.x as u32).max(1);
+        let vh = (available.y as u32).max(1);
+
+        renderer.ensure_viewport(&rs.device, &mut rs.renderer.write(), vw, vh);
+
+        let camera = *self
+            .preview_state
+            .camera
+            .get_or_insert_with(|| crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds));
+
+        renderer.render(
+            &rs.device,
+            &rs.queue,
+            &camera,
+            gpu_mesh,
+            self.gpu_texture_bind_group.as_ref(),
+            self.preview_state.wireframe,
+            self.preview_state.visibility.show_axes,
+            self.preview_state.visibility.show_grid,
+        );
+
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(vw as f32, vh as f32),
+            egui::Sense::click_and_drag(),
+        );
+
+        if let Some(texture_id) = renderer.egui_texture_id {
+            ui.painter().image(
+                texture_id,
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+
+        if response.dragged() {
+            let delta = ui.input(|input| input.pointer.delta());
+            let cam = self
+                .preview_state
+                .camera
+                .get_or_insert_with(|| crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds));
+            cam.orbit(delta.x * 0.01, -delta.y * 0.01);
+            ctx.request_repaint();
+        }
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll.abs() > f32::EPSILON {
+                let cam = self
+                    .preview_state
+                    .camera
+                    .get_or_insert_with(|| {
+                        crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds)
+                    });
+                cam.zoom((-scroll * 0.001).clamp(-0.5, 0.5));
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn update_gpu_mesh(&mut self) {
+        let selected = self.tree_state.selected_stream;
+        if self.gpu_mesh_stream_index == selected && selected.is_some() {
+            return;
+        }
+
+        let Some(stream_index) = selected else {
+            self.gpu_mesh = None;
+            self.gpu_texture_bind_group = None;
+            self.gpu_mesh_stream_index = None;
+            return;
+        };
+
+        let data = match self.get_stream_data(stream_index) {
+            Some(d) if pzz::classify_stream(d) == "pmf2" => d,
+            _ => {
+                self.gpu_mesh = None;
+                self.gpu_texture_bind_group = None;
+                self.gpu_mesh_stream_index = Some(stream_index);
+                return;
+            }
+        };
+
+        let (renderer, rs) = match (&self.gpu_renderer, &self.wgpu_state) {
+            (Some(r), Some(rs)) => (r, rs),
+            _ => return,
+        };
+        let device = &rs.device;
+        let queue = &rs.queue;
+
+        let (meshes, _, _, _) = pmf2::extract_per_bone_meshes(data, false);
+        self.gpu_mesh = renderer.upload_mesh(device, &meshes);
+        eprintln!(
+            "[gui] GPU mesh uploaded for stream {}: {} bone meshes, gpu_mesh={}",
+            stream_index,
+            meshes.len(),
+            self.gpu_mesh.is_some()
+        );
+
+        self.gpu_texture_bind_group = None;
+        let gim_index = stream_index + 1;
+        if let Some(gim_data) = self.get_stream_data(gim_index) {
+            if pzz::classify_stream(gim_data) == "gim" {
+                if let Ok(image) = crate::texture::GimImage::decode(gim_data) {
+                    self.gpu_texture_bind_group = Some(renderer.upload_texture(
+                        device,
+                        queue,
+                        &image.rgba,
+                        image.metadata.width as u32,
+                        image.metadata.height as u32,
+                    ));
+                    eprintln!(
+                        "[gui] GIM texture uploaded from stream {}: {}x{}",
+                        gim_index, image.metadata.width, image.metadata.height
+                    );
+                }
+            }
+        }
+
+        self.gpu_mesh_stream_index = Some(stream_index);
     }
 }

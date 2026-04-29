@@ -64,6 +64,7 @@ pub struct ModWorkspace {
 
 impl ModWorkspace {
     pub fn open_afs_file(path: PathBuf) -> Result<Self> {
+        eprintln!("[workspace] open_afs_file: {}", path.display());
         let (inventory, file_len) = afs::scan_inventory_from_file(&path)?;
         let afs_entries = inventory
             .entries
@@ -72,6 +73,19 @@ impl ModWorkspace {
             .map(|entry| entry_to_node(&entry, file_len))
             .collect::<Vec<_>>();
         let count = afs_entries.len();
+        let pzz_count = afs_entries.iter().filter(|e| e.kind == AssetKind::Pzz).count();
+        let empty_count = afs_entries
+            .iter()
+            .filter(|e| e.validation == EntryValidation::Empty)
+            .count();
+        let invalid_count = afs_entries
+            .iter()
+            .filter(|e| e.validation == EntryValidation::ExceedsBounds)
+            .count();
+        eprintln!(
+            "[workspace] AFS loaded: {} entries total, {} PZZ, {} empty, {} invalid, file_len={}",
+            count, pzz_count, empty_count, invalid_count, file_len
+        );
         Ok(Self {
             afs_path: Some(path),
             afs_bytes: None,
@@ -157,11 +171,16 @@ impl ModWorkspace {
     }
 
     pub fn open_pzz_entry(&mut self, entry_index: usize) -> Result<()> {
+        eprintln!("[workspace] open_pzz_entry: index={}", entry_index);
         let entry = self
             .afs_entries
             .iter()
             .find(|e| e.index == entry_index)
             .ok_or_else(|| anyhow::anyhow!("AFS entry {} not found", entry_index))?;
+        eprintln!(
+            "[workspace]   entry: name={:?}, kind={:?}, validation={:?}, offset=0x{:X}, size={}",
+            entry.name, entry.kind, entry.validation, entry.offset, entry.size
+        );
         if entry.validation != EntryValidation::Ok {
             bail!(
                 "AFS entry {} has validation issue: {:?}",
@@ -173,6 +192,7 @@ impl ModWorkspace {
         let offset = entry.offset;
         let size = entry.size;
         let data = if let Some(afs_path) = self.afs_path.as_ref() {
+            eprintln!("[workspace]   reading from file: offset=0x{:X}, size={}", offset, size);
             afs::read_entry_from_file(afs_path, offset, size)?
         } else if let Some(afs_bytes) = self.afs_bytes.as_ref() {
             let end = offset
@@ -185,7 +205,19 @@ impl ModWorkspace {
         } else {
             bail!("no AFS source available");
         };
-        self.open_pzz = Some(PzzWorkspace::new(name.clone(), Some(entry_index), data)?);
+        eprintln!("[workspace]   raw data read: {} bytes, first_4={:02X?}", data.len(), &data[..data.len().min(4)]);
+        let pzz_ws = PzzWorkspace::new(name.clone(), Some(entry_index), data)?;
+        eprintln!(
+            "[workspace]   PZZ opened: {} streams",
+            pzz_ws.streams().len()
+        );
+        for (i, node) in pzz_ws.streams().iter().enumerate() {
+            eprintln!(
+                "[workspace]     stream[{}]: name={:?}, kind={:?}, size={}",
+                i, node.name, node.kind, node.size
+            );
+        }
+        self.open_pzz = Some(pzz_ws);
         self.expanded_pzz_entry = Some(entry_index);
         self.operations
             .push(format!("Opened AFS entry {} as {}", entry_index, name));
@@ -193,6 +225,7 @@ impl ModWorkspace {
     }
 
     pub fn close_open_pzz(&mut self) {
+        eprintln!("[workspace] close_open_pzz (was entry {:?})", self.expanded_pzz_entry);
         self.open_pzz = None;
         self.expanded_pzz_entry = None;
     }
@@ -210,7 +243,27 @@ impl ModWorkspace {
 
 impl PzzWorkspace {
     pub fn new(name: String, afs_entry_index: Option<usize>, original: Vec<u8>) -> Result<Self> {
-        let streams = pzz::extract_pzz_streams_strict(&original)?.streams;
+        eprintln!("[pzz_ws] PzzWorkspace::new: name={:?}, afs_entry={:?}, raw_len={}", name, afs_entry_index, original.len());
+        let result = pzz::extract_pzz_streams_strict(&original);
+        match &result {
+            Ok(pzz_streams) => {
+                eprintln!("[pzz_ws]   extract_pzz_streams_strict OK: {} streams, key=0x{:08X}", pzz_streams.streams.len(), pzz_streams.info.key);
+                eprintln!("[pzz_ws]   info: descriptors={}, chunks={}, has_tail={}", pzz_streams.info.descriptor_count, pzz_streams.info.chunk_count, pzz_streams.info.has_tail);
+                for (i, s) in pzz_streams.streams.iter().enumerate() {
+                    let kind = pzz::classify_stream(s);
+                    let magic_hex = if s.len() >= 4 {
+                        format!("{:02X} {:02X} {:02X} {:02X}", s[0], s[1], s[2], s[3])
+                    } else {
+                        format!("{:02X?}", &s[..s.len().min(4)])
+                    };
+                    eprintln!("[pzz_ws]     stream[{}]: size={}, classify={:?}, magic=[{}]", i, s.len(), kind, magic_hex);
+                }
+            }
+            Err(e) => {
+                eprintln!("[pzz_ws]   extract_pzz_streams_strict FAILED: {}", e);
+            }
+        }
+        let streams = result?.streams;
         let stream_nodes = streams
             .iter()
             .enumerate()

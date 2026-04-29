@@ -138,6 +138,7 @@ fn stream_chunk_indices(layout: &PzzLayout) -> Vec<usize> {
 pub fn find_pzz_key(raw: &[u8]) -> Option<u32> {
     let sz = raw.len();
     if sz < 8 {
+        eprintln!("[pzz] find_pzz_key: data too small ({} bytes)", sz);
         return None;
     }
     let raw_w0 = ru32(raw, 0);
@@ -164,9 +165,11 @@ pub fn find_pzz_key(raw: &[u8]) -> Option<u32> {
             off += 4;
         }
         if ok {
+            eprintln!("[pzz] find_pzz_key: found key=0x{:08X} (entry_count={})", key, fc);
             return Some(key);
         }
     }
+    eprintln!("[pzz] find_pzz_key: no valid key found (raw_w0=0x{:08X})", raw_w0);
     None
 }
 
@@ -306,17 +309,53 @@ pub fn inspect_pzz(raw: &[u8]) -> Result<PzzInfo> {
 }
 
 pub fn extract_pzz_streams_strict(raw: &[u8]) -> Result<PzzStreams> {
+    eprintln!("[pzz] extract_pzz_streams_strict: raw_len={}", raw.len());
     let layout = parse_layout(raw).ok_or_else(|| anyhow::anyhow!("failed to parse PZZ layout"))?;
+    eprintln!(
+        "[pzz]   layout: key=0x{:08X}, descriptors={}, chunks={}, tail_len={}",
+        layout.key, layout.descriptors.len(), layout.chunks.len(), layout.tail.len()
+    );
+    for (i, desc) in layout.descriptors.iter().enumerate() {
+        let is_stream = desc & 0x4000_0000 != 0;
+        let units = (desc & 0x3FFF_FFFF) as usize;
+        let chunk_size = layout.chunks.get(i).map(|c| c.len()).unwrap_or(0);
+        let decodable = layout.chunks.get(i).map(|c| decode_stream_chunk(c).is_some()).unwrap_or(false);
+        eprintln!(
+            "[pzz]     desc[{}]: 0x{:08X} stream_flag={}, units={}, chunk_bytes={}, decodable={}",
+            i, desc, is_stream, units, chunk_size, decodable
+        );
+    }
+    let stream_indices = stream_chunk_indices(&layout);
+    eprintln!("[pzz]   stream_chunk_indices: {:?}", stream_indices);
     let mut streams = Vec::new();
-    for chunk_index in stream_chunk_indices(&layout) {
-        let stream = decode_stream_chunk(&layout.chunks[chunk_index])
-            .ok_or_else(|| anyhow::anyhow!("failed to decode PZZ stream chunk {}", chunk_index))?;
-        streams.push(stream);
+    for chunk_index in &stream_indices {
+        match decode_stream_chunk(&layout.chunks[*chunk_index]) {
+            Some(stream) => {
+                let kind = classify_stream(&stream);
+                eprintln!(
+                    "[pzz]     decoded chunk[{}]: {} bytes, classify={:?}",
+                    chunk_index, stream.len(), kind
+                );
+                streams.push(stream);
+            }
+            None => {
+                let chunk = &layout.chunks[*chunk_index];
+                let header = if chunk.len() >= 8 {
+                    format!("comp_len={}, raw_len={}", rb32(chunk, 0), rb32(chunk, 4))
+                } else {
+                    format!("chunk too small: {} bytes", chunk.len())
+                };
+                eprintln!("[pzz]     FAILED to decode chunk[{}]: {}", chunk_index, header);
+                bail!("failed to decode PZZ stream chunk {}", chunk_index);
+            }
+        }
     }
     if streams.is_empty() {
+        eprintln!("[pzz]   no decodable streams found!");
         bail!("PZZ contains no decodable streams");
     }
     let info = inspect_pzz(raw)?;
+    eprintln!("[pzz]   result: {} streams extracted", streams.len());
     Ok(PzzStreams { info, streams })
 }
 

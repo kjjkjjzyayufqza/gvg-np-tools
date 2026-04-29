@@ -37,6 +37,7 @@ pub struct PreviewCamera {
 pub struct PreviewVisibility {
     pub show_axes: bool,
     pub show_bounds: bool,
+    pub show_grid: bool,
     hidden_bones: BTreeSet<usize>,
 }
 
@@ -88,6 +89,7 @@ impl Default for PreviewVisibility {
         Self {
             show_axes: true,
             show_bounds: true,
+            show_grid: true,
             hidden_bones: BTreeSet::new(),
         }
     }
@@ -112,7 +114,7 @@ impl Default for PreviewState {
         Self {
             camera: None,
             visibility: PreviewVisibility::default(),
-            wireframe: true,
+            wireframe: false,
         }
     }
 }

@@ -35,7 +35,8 @@ pub fn show_editor_windows(
         let mut open = true;
         egui::Window::new(format!("PMF2 Metadata - stream{:03}", stream_index))
             .open(&mut open)
-            .default_size([500.0, 400.0])
+            .default_size([560.0, 400.0])
+            .resizable(true)
             .show(ctx, |ui| {
                 show_pmf2_metadata_editor(ui, workspace, stream_index);
             });
@@ -48,7 +49,8 @@ pub fn show_editor_windows(
         let mut open = true;
         egui::Window::new(format!("PMF2 Data - stream{:03}", stream_index))
             .open(&mut open)
-            .default_size([500.0, 400.0])
+            .default_size([560.0, 400.0])
+            .resizable(true)
             .show(ctx, |ui| {
                 show_pmf2_data_viewer(ui, workspace, stream_index);
             });
@@ -61,7 +63,8 @@ pub fn show_editor_windows(
         let mut open = true;
         egui::Window::new(format!("GIM Preview - stream{:03}", stream_index))
             .open(&mut open)
-            .default_size([400.0, 400.0])
+            .default_size([420.0, 400.0])
+            .resizable(true)
             .show(ctx, |ui| {
                 if let Some(result) = show_gim_preview_editor(ui, workspace, stream_index) {
                     action = result;
@@ -76,7 +79,8 @@ pub fn show_editor_windows(
         let mut open = true;
         egui::Window::new(format!("Hex View - stream{:03}", stream_index))
             .open(&mut open)
-            .default_size([600.0, 400.0])
+            .default_size([640.0, 400.0])
+            .resizable(true)
             .show(ctx, |ui| {
                 show_hex_viewer(ui, workspace, stream_index);
             });
@@ -89,7 +93,8 @@ pub fn show_editor_windows(
         let mut open = true;
         egui::Window::new("Save Planner")
             .open(&mut open)
-            .default_size([500.0, 350.0])
+            .default_size([560.0, 350.0])
+            .resizable(true)
             .show(ctx, |ui| {
                 if let Some(result) = show_save_planner(ui, workspace) {
                     action = result;
@@ -126,7 +131,8 @@ fn show_pmf2_metadata_editor(ui: &mut egui::Ui, workspace: &ModWorkspace, stream
     ));
     ui.label(format!("Sections: {}", sections.len()));
     ui.separator();
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    egui::ScrollArea::both().show(ui, |ui| {
+        ui.set_min_width(500.0);
         for section in sections {
             ui.collapsing(&section.name, |ui| {
                 ui.monospace(format!("Index: {}", section.index));
@@ -150,7 +156,8 @@ fn show_pmf2_data_viewer(ui: &mut egui::Ui, workspace: &ModWorkspace, stream_ind
         return;
     }
     let (meshes, _, _, _) = pmf2::extract_per_bone_meshes(data, false);
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    egui::ScrollArea::both().show(ui, |ui| {
+        ui.set_min_width(500.0);
         for mesh in meshes {
             ui.collapsing(&mesh.bone_name, |ui| {
                 ui.monospace(format!("Vertices: {}", mesh.vertices.len()));

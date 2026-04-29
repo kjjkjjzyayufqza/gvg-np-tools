@@ -61,20 +61,18 @@ pub fn show_asset_tree(
         if has_filter && !entry.name.to_lowercase().contains(&filter_lower) {
             continue;
         }
+        let is_expanded = expanded_pzz == Some(entry.index);
         rows.push(TreeRow::AfsEntry {
             index: entry.index,
             name: entry.name.clone(),
             size: entry.size,
             kind: entry.kind,
             validation: entry.validation,
-            is_expanded: expanded_pzz == Some(entry.index),
+            is_expanded,
         });
-        if expanded_pzz == Some(entry.index) {
+        if is_expanded {
             if let Some(streams) = pzz_streams {
                 for stream in streams {
-                    if has_filter && !stream.name.to_lowercase().contains(&filter_lower) {
-                        continue;
-                    }
                     rows.push(TreeRow::Stream {
                         index: stream.index,
                         name: stream.name.clone(),
@@ -103,6 +101,7 @@ pub fn show_asset_tree(
             }
         }
     }
+
 
     let row_height = 20.0;
     egui::ScrollArea::vertical()

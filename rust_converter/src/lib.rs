@@ -1,5 +1,6 @@
 pub mod afs;
 pub mod dae;
+pub mod gpu_renderer;
 pub mod gui;
 pub mod pmf2;
 pub mod pzz;
