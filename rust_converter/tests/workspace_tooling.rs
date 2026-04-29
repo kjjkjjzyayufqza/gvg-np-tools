@@ -102,18 +102,9 @@ fn make_pzz_with_non_stream_chunk() -> Vec<u8> {
 
 #[test]
 fn library_modules_are_available_to_gui_and_cli() {
-    let inventory = AfsInventory {
-        file: Some("Z_DATA.BIN".to_string()),
-        file_count: Some(1),
-        entries: vec![AfsEntry {
-            index: 0,
-            offset: 2048,
-            size: 16,
-            name: Some("pl00.pzz".to_string()),
-        }],
-    };
-
-    let workspace = ModWorkspace::from_inventory(inventory);
+    let pzz = build_pzz(&[b"PMF2 model".to_vec()], 0x1234_5678);
+    let afs = make_afs(&[("pl00.pzz", &pzz)]);
+    let workspace = ModWorkspace::open_afs_bytes("Z_DATA.BIN", afs).unwrap();
 
     assert_eq!(workspace.afs_entries().len(), 1);
     assert_eq!(workspace.afs_entries()[0].kind, AssetKind::Pzz);
@@ -129,15 +120,11 @@ fn workspace_tracks_stream_replacements_and_new_streams() {
     workspace
         .replace_stream(0, b"PMF2 replacement".to_vec())
         .unwrap();
-    workspace
-        .add_stream("texture.gim", b"MIG.00.1PSP image".to_vec())
-        .unwrap();
 
     let pzz = workspace.open_pzz().unwrap();
     assert!(pzz.is_dirty());
-    assert_eq!(pzz.streams().len(), 2);
+    assert_eq!(pzz.streams().len(), 1);
     assert_eq!(pzz.streams()[0].kind, AssetKind::Pmf2);
-    assert_eq!(pzz.streams()[1].kind, AssetKind::Gim);
 }
 
 #[test]
@@ -163,13 +150,13 @@ fn workspace_opens_pzz_entries_without_losing_afs_context() {
 }
 
 #[test]
-fn workspace_detects_pzz_entries_without_name_table() {
+fn workspace_without_name_table_marks_entries_as_raw() {
     let pzz = build_pzz(&[b"PMF2 model".to_vec()], 0x1234_5678);
     let afs = make_afs_without_names(&[&pzz, b"abcd"]);
     let workspace = ModWorkspace::open_afs_bytes("Z_DATA.BIN", afs).unwrap();
 
-    assert_eq!(workspace.afs_entries()[0].kind, AssetKind::Pzz);
-    assert_eq!(workspace.afs_entries()[1].kind, AssetKind::AfsEntry);
+    assert_eq!(workspace.afs_entries()[0].kind, AssetKind::Raw);
+    assert_eq!(workspace.afs_entries()[1].kind, AssetKind::Raw);
 }
 
 #[test]

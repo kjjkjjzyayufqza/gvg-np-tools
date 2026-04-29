@@ -7,12 +7,19 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetKind {
-    AfsEntry,
     Pzz,
     Pmf2,
     Gim,
     Sad,
     Raw,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryValidation {
+    Ok,
+    Empty,
+    ExceedsBounds,
+    Overlapping,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +29,7 @@ pub struct AfsEntryNode {
     pub offset: usize,
     pub size: usize,
     pub kind: AssetKind,
+    pub validation: EntryValidation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,124 +52,149 @@ pub struct PzzWorkspace {
 
 #[derive(Clone, Debug, Default)]
 pub struct ModWorkspace {
-    source_path: Option<PathBuf>,
-    afs_data: Option<Vec<u8>>,
+    afs_path: Option<PathBuf>,
+    afs_bytes: Option<Vec<u8>>,
+    afs_file_len: u64,
     inventory: Option<AfsInventory>,
     afs_entries: Vec<AfsEntryNode>,
     open_pzz: Option<PzzWorkspace>,
+    expanded_pzz_entry: Option<usize>,
     operations: Vec<String>,
 }
 
 impl ModWorkspace {
-    pub fn from_inventory(inventory: AfsInventory) -> Self {
+    pub fn open_afs_file(path: PathBuf) -> Result<Self> {
+        let (inventory, file_len) = afs::scan_inventory_from_file(&path)?;
         let afs_entries = inventory
             .entries
             .iter()
             .cloned()
-            .map(|entry| entry_to_node(entry, None))
+            .map(|entry| entry_to_node(&entry, file_len))
             .collect::<Vec<_>>();
-        Self {
-            source_path: inventory.file.clone().map(PathBuf::from),
-            afs_data: None,
+        let count = afs_entries.len();
+        Ok(Self {
+            afs_path: Some(path),
+            afs_bytes: None,
+            afs_file_len: file_len,
             inventory: Some(inventory),
             afs_entries,
             open_pzz: None,
-            operations: Vec::new(),
-        }
+            expanded_pzz_entry: None,
+            operations: vec![format!("Loaded AFS ({} entries)", count)],
+        })
+    }
+
+    pub fn open_pzz_file(path: PathBuf) -> Result<Self> {
+        let data = std::fs::read(&path)?;
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model.pzz")
+            .to_string();
+        Self::open_pzz_bytes(name, data)
+    }
+
+    pub fn open_pzz_bytes(name: impl Into<String>, data: Vec<u8>) -> Result<Self> {
+        let name = name.into();
+        let pzz = PzzWorkspace::new(name.clone(), None, data)?;
+        Ok(Self {
+            afs_path: None,
+            afs_bytes: None,
+            afs_file_len: 0,
+            inventory: None,
+            afs_entries: Vec::new(),
+            open_pzz: Some(pzz),
+            expanded_pzz_entry: None,
+            operations: vec![format!("Loaded PZZ {}", name)],
+        })
     }
 
     pub fn open_afs_bytes(name: impl Into<String>, data: Vec<u8>) -> Result<Self> {
         let name = name.into();
         let inventory = afs::scan_inventory(&data, Some(name.clone()))?;
+        let file_len = data.len() as u64;
         let afs_entries = inventory
             .entries
             .iter()
             .cloned()
-            .map(|entry| {
-                let payload = data.get(entry.offset..entry.offset + entry.size);
-                entry_to_node(entry, payload)
-            })
+            .map(|entry| entry_to_node(&entry, file_len))
             .collect::<Vec<_>>();
+        let count = afs_entries.len();
         Ok(Self {
-            source_path: Some(PathBuf::from(name)),
-            afs_data: Some(data),
+            afs_path: None,
+            afs_bytes: Some(data),
+            afs_file_len: file_len,
             inventory: Some(inventory),
             afs_entries,
             open_pzz: None,
-            operations: Vec::new(),
+            expanded_pzz_entry: None,
+            operations: vec![format!("Loaded AFS ({} entries)", count)],
         })
-    }
-
-    pub fn open_pzz_bytes(name: impl Into<String>, data: Vec<u8>) -> Result<Self> {
-        let pzz = PzzWorkspace::new(name.into(), None, data)?;
-        let mut workspace = Self::default();
-        workspace
-            .operations
-            .push(format!("Opened PZZ {}", pzz.name));
-        workspace.open_pzz = Some(pzz);
-        Ok(workspace)
     }
 
     pub fn afs_entries(&self) -> &[AfsEntryNode] {
         &self.afs_entries
     }
 
-    pub fn source_path(&self) -> Option<&PathBuf> {
-        self.source_path.as_ref()
+    pub fn afs_path(&self) -> Option<&PathBuf> {
+        self.afs_path.as_ref()
     }
 
     pub fn open_pzz(&self) -> Option<&PzzWorkspace> {
         self.open_pzz.as_ref()
     }
 
-    pub fn open_pzz_mut(&mut self) -> Option<&mut PzzWorkspace> {
-        self.open_pzz.as_mut()
-    }
-
-    pub fn close_open_pzz(&mut self) {
-        self.open_pzz = None;
+    pub fn expanded_pzz_entry(&self) -> Option<usize> {
+        self.expanded_pzz_entry
     }
 
     pub fn operation_log(&self) -> &[String] {
         &self.operations
     }
 
+    pub fn push_log(&mut self, msg: String) {
+        self.operations.push(msg);
+    }
+
     pub fn open_pzz_entry(&mut self, entry_index: usize) -> Result<()> {
-        let data = self
-            .afs_data
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("workspace was not opened from AFS bytes"))?;
-        let inventory = self
-            .inventory
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("workspace has no AFS inventory"))?;
-        let entry = inventory
-            .entries
+        let entry = self
+            .afs_entries
             .iter()
-            .find(|entry| entry.index == entry_index)
+            .find(|e| e.index == entry_index)
             .ok_or_else(|| anyhow::anyhow!("AFS entry {} not found", entry_index))?;
-        let name = entry
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("entry{:04}.pzz", entry.index));
-        if !name.to_ascii_lowercase().ends_with(".pzz") {
-            bail!("AFS entry {} is not a PZZ file", entry_index);
+        if entry.validation != EntryValidation::Ok {
+            bail!(
+                "AFS entry {} has validation issue: {:?}",
+                entry_index,
+                entry.validation
+            );
         }
-        let end = entry
-            .offset
-            .checked_add(entry.size)
-            .ok_or_else(|| anyhow::anyhow!("AFS entry size overflows"))?;
-        if end > data.len() {
-            bail!("AFS entry {} exceeds source data", entry_index);
-        }
-        self.open_pzz = Some(PzzWorkspace::new(
-            name.clone(),
-            Some(entry.index),
-            data[entry.offset..end].to_vec(),
-        )?);
+        let name = entry.name.clone();
+        let offset = entry.offset;
+        let size = entry.size;
+        let data = if let Some(afs_path) = self.afs_path.as_ref() {
+            afs::read_entry_from_file(afs_path, offset, size)?
+        } else if let Some(afs_bytes) = self.afs_bytes.as_ref() {
+            let end = offset
+                .checked_add(size)
+                .ok_or_else(|| anyhow::anyhow!("entry size overflow"))?;
+            if end > afs_bytes.len() {
+                bail!("AFS entry {} exceeds data bounds", entry_index);
+            }
+            afs_bytes[offset..end].to_vec()
+        } else {
+            bail!("no AFS source available");
+        };
+        self.open_pzz = Some(PzzWorkspace::new(name.clone(), Some(entry_index), data)?);
+        self.expanded_pzz_entry = Some(entry_index);
         self.operations
             .push(format!("Opened AFS entry {} as {}", entry_index, name));
         Ok(())
+    }
+
+    pub fn close_open_pzz(&mut self) {
+        self.open_pzz = None;
+        self.expanded_pzz_entry = None;
     }
 
     pub fn replace_stream(&mut self, index: usize, data: Vec<u8>) -> Result<()> {
@@ -171,17 +204,6 @@ impl ModWorkspace {
             .ok_or_else(|| anyhow::anyhow!("no PZZ is open"))?;
         pzz.replace_stream(index, data)?;
         self.operations.push(format!("Replaced stream{:03}", index));
-        Ok(())
-    }
-
-    pub fn add_stream(&mut self, name: impl Into<String>, data: Vec<u8>) -> Result<()> {
-        let pzz = self
-            .open_pzz
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("no PZZ is open"))?;
-        let name = name.into();
-        pzz.add_stream(name.clone(), data)?;
-        self.operations.push(format!("Added stream {}", name));
         Ok(())
     }
 }
@@ -235,30 +257,28 @@ impl PzzWorkspace {
         self.stream_nodes[index] = stream_to_node(index, None, &self.streams[index], true);
         Ok(())
     }
-
-    pub fn add_stream(&mut self, name: String, data: Vec<u8>) -> Result<()> {
-        let index = self.streams.len();
-        self.streams.push(data);
-        self.stream_nodes.push(stream_to_node(
-            index,
-            Some(name),
-            &self.streams[index],
-            true,
-        ));
-        Ok(())
-    }
 }
 
-fn entry_to_node(entry: AfsEntry, payload: Option<&[u8]>) -> AfsEntryNode {
+fn entry_to_node(entry: &AfsEntry, file_len: u64) -> AfsEntryNode {
     let name = entry
         .name
+        .clone()
         .unwrap_or_else(|| format!("entry{:04}.bin", entry.index));
-    let kind = if name.to_ascii_lowercase().ends_with(".pzz")
-        || payload.map(is_pzz_payload).unwrap_or(false)
+    let validation = if entry.offset == 0 && entry.size == 0 {
+        EntryValidation::Empty
+    } else if entry
+        .offset
+        .checked_add(entry.size)
+        .is_none_or(|end| end as u64 > file_len)
     {
+        EntryValidation::ExceedsBounds
+    } else {
+        EntryValidation::Ok
+    };
+    let kind = if name.to_ascii_lowercase().ends_with(".pzz") {
         AssetKind::Pzz
     } else {
-        AssetKind::AfsEntry
+        AssetKind::Raw
     };
     AfsEntryNode {
         index: entry.index,
@@ -266,11 +286,8 @@ fn entry_to_node(entry: AfsEntry, payload: Option<&[u8]>) -> AfsEntryNode {
         offset: entry.offset,
         size: entry.size,
         kind,
+        validation,
     }
-}
-
-fn is_pzz_payload(data: &[u8]) -> bool {
-    pzz::inspect_pzz(data).is_ok()
 }
 
 fn stream_to_node(index: usize, name: Option<String>, data: &[u8], dirty: bool) -> StreamNode {

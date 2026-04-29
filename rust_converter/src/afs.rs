@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 fn ru32(d: &[u8], o: usize) -> u32 {
@@ -67,12 +68,88 @@ pub fn find_entry_by_name<'a>(inv: &'a AfsInventory, name: &str) -> Option<&'a A
 }
 
 pub fn read_entry(afs_path: &Path, entry: &AfsEntry) -> Result<Vec<u8>> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(afs_path)?;
-    f.seek(SeekFrom::Start(entry.offset as u64))?;
-    let mut buf = vec![0u8; entry.size];
+    read_entry_from_file(afs_path, entry.offset, entry.size)
+}
+
+pub fn read_entry_from_file(path: &Path, offset: usize, size: usize) -> Result<Vec<u8>> {
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::Start(offset as u64))?;
+    let mut buf = vec![0u8; size];
     f.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+pub fn scan_inventory_from_file(path: &Path) -> Result<(AfsInventory, u64)> {
+    let mut f = std::fs::File::open(path)?;
+    let file_len = f.seek(SeekFrom::End(0))?;
+    f.seek(SeekFrom::Start(0))?;
+
+    let mut header = [0u8; 8];
+    f.read_exact(&mut header)?;
+    if &header[0..4] != b"AFS\0" {
+        bail!("unsupported AFS magic");
+    }
+    let file_count = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+    if file_count == 0 {
+        bail!("AFS file count is zero");
+    }
+
+    let table_size = file_count * 8;
+    let mut table_buf = vec![0u8; table_size + 8];
+    f.read_exact(&mut table_buf)?;
+
+    let name_offset = ru32(&table_buf, table_size) as usize;
+    let name_size = ru32(&table_buf, table_size + 4) as usize;
+
+    let mut name_table = Vec::new();
+    if name_offset > 0 && name_size > 0 && (name_offset as u64 + name_size as u64) <= file_len {
+        name_table.resize(name_size, 0u8);
+        f.seek(SeekFrom::Start(name_offset as u64))?;
+        f.read_exact(&mut name_table)?;
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(String::from);
+
+    let mut entries = Vec::with_capacity(file_count);
+    for index in 0..file_count {
+        let pos = index * 8;
+        let offset = ru32(&table_buf, pos) as usize;
+        let size = ru32(&table_buf, pos + 4) as usize;
+        let name = if !name_table.is_empty() && name_size >= file_count * 0x30 {
+            let row = index * 0x30;
+            if row + 0x20 <= name_table.len() {
+                let raw = &name_table[row..row + 0x20];
+                let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+                if end > 0 {
+                    Some(String::from_utf8_lossy(&raw[..end]).to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        entries.push(AfsEntry {
+            index,
+            offset,
+            size,
+            name,
+        });
+    }
+
+    Ok((
+        AfsInventory {
+            file: file_name,
+            file_count: Some(file_count),
+            entries,
+        },
+        file_len,
+    ))
 }
 
 pub fn scan_inventory(data: &[u8], file_name: Option<String>) -> Result<AfsInventory> {
