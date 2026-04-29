@@ -244,42 +244,47 @@ fn show_pmf2_metadata_editor(
     ui.separator();
 
     let section_count = editor_state.edit.sections.len();
-    egui::ScrollArea::both().show(ui, |ui| {
-        ui.set_min_width(500.0);
-        for (index, section) in editor_state.edit.sections.iter_mut().enumerate() {
-            let title = format!("#{:03} {}", index, section.name);
-            ui.collapsing(title, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut section.name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Parent");
-                    ui.add(
-                        egui::DragValue::new(&mut section.parent)
-                            .speed(1)
-                            .range(-1..=(section_count as i32 - 1)),
-                    );
-                });
-                ui.label("Local matrix");
-                egui::Grid::new(format!("pmf2_matrix_{}_{}", stream_index, index))
-                    .num_columns(4)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        for row in 0..4 {
-                            for col in 0..4 {
-                                let matrix_index = row * 4 + col;
-                                ui.add(
-                                    egui::DragValue::new(&mut section.local_matrix[matrix_index])
-                                        .speed(0.001),
-                                );
-                            }
-                            ui.end_row();
-                        }
+    let metadata_scroll_height = (ui.available_height() - 48.0).clamp(160.0, 520.0);
+    egui::ScrollArea::both()
+        .max_height(metadata_scroll_height)
+        .show(ui, |ui| {
+            ui.set_min_width(500.0);
+            for (index, section) in editor_state.edit.sections.iter_mut().enumerate() {
+                let title = format!("#{:03} {}", index, section.name);
+                ui.collapsing(title, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        ui.text_edit_singleline(&mut section.name);
                     });
-            });
-        }
-    });
+                    ui.horizontal(|ui| {
+                        ui.label("Parent");
+                        ui.add(
+                            egui::DragValue::new(&mut section.parent)
+                                .speed(1)
+                                .range(-1..=(section_count as i32 - 1)),
+                        );
+                    });
+                    ui.label("Local matrix");
+                    egui::Grid::new(format!("pmf2_matrix_{}_{}", stream_index, index))
+                        .num_columns(4)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            for row in 0..4 {
+                                for col in 0..4 {
+                                    let matrix_index = row * 4 + col;
+                                    ui.add(
+                                        egui::DragValue::new(
+                                            &mut section.local_matrix[matrix_index],
+                                        )
+                                        .speed(0.001),
+                                    );
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+            }
+        });
 
     ui.separator();
     let mut result = None;
