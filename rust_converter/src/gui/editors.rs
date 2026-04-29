@@ -1,6 +1,7 @@
-use crate::{pmf2, pzz, save::PzzSavePlanner, texture::GimImage, workspace::ModWorkspace};
+use crate::{pmf2, pzz, save::{PzzSavePlan, PzzSavePlanner}, texture::GimImage, workspace::ModWorkspace};
 use anyhow::Result;
 use eframe::egui;
+use std::path::PathBuf;
 
 #[derive(Default)]
 pub struct EditorWindows {
@@ -9,18 +10,33 @@ pub struct EditorWindows {
     pub gim_preview: Option<usize>,
     pub hex_view: Option<usize>,
     pub save_planner: bool,
+    cached_save_plan: Option<Result<PzzSavePlan, String>>,
 }
 
 pub struct EditorAction {
     pub status: Option<String>,
+    /// When true, show an egui modal with the status text plus bottom status bar copy.
+    pub error_modal: bool,
 }
 
 impl EditorAction {
     fn none() -> Self {
-        Self { status: None }
+        Self {
+            status: None,
+            error_modal: false,
+        }
     }
     fn status(msg: String) -> Self {
-        Self { status: Some(msg) }
+        Self {
+            status: Some(msg),
+            error_modal: false,
+        }
+    }
+    fn error(msg: String) -> Self {
+        Self {
+            status: Some(msg.clone()),
+            error_modal: true,
+        }
     }
 }
 
@@ -28,6 +44,8 @@ pub fn show_editor_windows(
     ctx: &egui::Context,
     workspace: &mut ModWorkspace,
     editors: &mut EditorWindows,
+    last_dir_save_pzz_as: &mut Option<PathBuf>,
+    last_dir_patch_afs_entry: &mut Option<PathBuf>,
 ) -> EditorAction {
     let mut action = EditorAction::none();
 
@@ -96,12 +114,19 @@ pub fn show_editor_windows(
             .default_size([560.0, 350.0])
             .resizable(true)
             .show(ctx, |ui| {
-                if let Some(result) = show_save_planner(ui, workspace) {
+                if let Some(result) = show_save_planner(
+                    ui,
+                    workspace,
+                    &mut editors.cached_save_plan,
+                    last_dir_save_pzz_as,
+                    last_dir_patch_afs_entry,
+                ) {
                     action = result;
                 }
             });
         if !open {
             editors.save_planner = false;
+            editors.cached_save_plan = None;
         }
     }
 
@@ -250,7 +275,7 @@ fn export_gim_png(image: &GimImage) -> EditorAction {
     }
     match output.save(&path) {
         Ok(()) => EditorAction::status(format!("Exported PNG: {}", path.display())),
-        Err(e) => EditorAction::status(format!("PNG export failed: {e}")),
+        Err(e) => EditorAction::error(format!("PNG export failed: {e}")),
     }
 }
 
@@ -267,15 +292,15 @@ fn replace_gim_png(
     };
     let png_data = match std::fs::read(&path) {
         Ok(d) => d,
-        Err(e) => return EditorAction::status(format!("Failed to read PNG: {e}")),
+        Err(e) => return EditorAction::error(format!("Failed to read PNG: {e}")),
     };
     let replaced = match image.replace_png_bytes(&png_data) {
         Ok(d) => d,
-        Err(e) => return EditorAction::status(format!("GIM replace failed: {e}")),
+        Err(e) => return EditorAction::error(format!("GIM replace failed: {e}")),
     };
     match workspace.replace_stream(stream_index, replaced) {
         Ok(()) => EditorAction::status("Replaced GIM stream from PNG".to_string()),
-        Err(e) => EditorAction::status(format!("Stream replace failed: {e}")),
+        Err(e) => EditorAction::error(format!("Stream replace failed: {e}")),
     }
 }
 
@@ -318,21 +343,30 @@ fn show_hex_viewer(ui: &mut egui::Ui, workspace: &ModWorkspace, stream_index: us
 fn show_save_planner(
     ui: &mut egui::Ui,
     workspace: &mut ModWorkspace,
+    cached_plan: &mut Option<Result<PzzSavePlan, String>>,
+    last_dir_save_pzz_as: &mut Option<PathBuf>,
+    last_dir_patch_afs_entry: &mut Option<PathBuf>,
 ) -> Option<EditorAction> {
     let Some(pzz) = workspace.open_pzz() else {
         ui.label("Open a PZZ to inspect save impact.");
         return None;
     };
-    let planner = PzzSavePlanner::new(pzz.original(), pzz.stream_data().to_vec());
-    let original_stream_count = pzz::inspect_pzz(pzz.original())
-        .map(|info| info.stream_count)
-        .unwrap_or(0);
-    let plan = if original_stream_count == pzz.stream_data().len() {
-        planner.plan_preserving_layout()
-    } else {
-        planner.plan_stream_archive_rebuild()
-    };
-    match plan {
+
+    if cached_plan.is_none() {
+        let planner = PzzSavePlanner::new(pzz.original(), pzz.stream_data().to_vec());
+        let original_stream_count = pzz::inspect_pzz(pzz.original())
+            .map(|info| info.stream_count)
+            .unwrap_or(0);
+        let plan = if original_stream_count == pzz.stream_data().len() {
+            planner.plan_preserving_layout()
+        } else {
+            planner.plan_stream_archive_rebuild()
+        };
+        *cached_plan = Some(plan.map_err(|e| e.to_string()));
+    }
+
+    let plan_result = cached_plan.as_ref().unwrap();
+    match plan_result {
         Ok(plan) => {
             ui.strong("PZZ Rebuild Summary");
             ui.separator();
@@ -349,16 +383,22 @@ fn show_save_planner(
             let mut result = None;
             ui.horizontal(|ui| {
                 if ui.button("Save PZZ As...").clicked() {
-                    result = Some(save_pzz_dialog(workspace));
+                    result = Some(save_pzz_dialog(workspace, last_dir_save_pzz_as));
                 }
                 if ui.button("Patch AFS Entry...").clicked() {
-                    result = Some(patch_afs_dialog(workspace));
+                    result = Some(patch_afs_dialog(workspace, last_dir_patch_afs_entry));
+                }
+                if ui.button("Recalculate").clicked() {
+                    *cached_plan = None;
                 }
             });
             result
         }
         Err(e) => {
             ui.label(format!("Save plan failed: {e}"));
+            if ui.button("Retry").clicked() {
+                *cached_plan = None;
+            }
             None
         }
     }
@@ -377,54 +417,71 @@ fn plan_pzz_save(workspace: &ModWorkspace) -> Result<Vec<u8>> {
     }
 }
 
-fn save_pzz_dialog(workspace: &ModWorkspace) -> EditorAction {
+fn save_pzz_dialog(
+    workspace: &ModWorkspace,
+    last_dir: &mut Option<PathBuf>,
+) -> EditorAction {
     let Some(pzz) = workspace.open_pzz() else {
-        return EditorAction::status("No PZZ is open".to_string());
+        return EditorAction::error("No PZZ is open.".to_string());
     };
-    let Some(path) = rfd::FileDialog::new().set_file_name(pzz.name()).save_file() else {
+    let mut dialog = rfd::FileDialog::new().set_file_name(pzz.name());
+    if let Some(dir) = last_dir.clone() {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(path) = dialog.save_file() else {
         return EditorAction::none();
     };
     match plan_pzz_save(workspace)
         .and_then(|rebuilt| std::fs::write(&path, rebuilt).map_err(anyhow::Error::from))
     {
-        Ok(()) => EditorAction::status(format!("Saved PZZ: {}", path.display())),
-        Err(e) => EditorAction::status(format!("Failed to save PZZ: {e}")),
+        Ok(()) => {
+            super::remember_parent_dir(last_dir, &path);
+            EditorAction::status(format!("Saved PZZ: {}", path.display()))
+        }
+        Err(e) => EditorAction::error(format!("Failed to save PZZ: {e}")),
     }
 }
 
-fn patch_afs_dialog(workspace: &ModWorkspace) -> EditorAction {
+fn patch_afs_dialog(
+    workspace: &ModWorkspace,
+    last_dir: &mut Option<PathBuf>,
+) -> EditorAction {
     let Some(afs_path) = workspace.afs_path() else {
-        return EditorAction::status("No AFS file is open".to_string());
+        return EditorAction::error("No AFS file is open.".to_string());
     };
     let Some(pzz) = workspace.open_pzz() else {
-        return EditorAction::status("No PZZ is open".to_string());
+        return EditorAction::error("No PZZ is open.".to_string());
     };
     let Some(entry_index) = pzz.afs_entry_index() else {
-        return EditorAction::status("PZZ was not opened from AFS".to_string());
+        return EditorAction::error("PZZ was not opened from AFS.".to_string());
     };
-    let Some(output_path) = rfd::FileDialog::new()
-        .set_file_name("Z_DATA_patched.BIN")
-        .save_file()
-    else {
+    let mut dialog = rfd::FileDialog::new().set_file_name("Z_DATA_patched.BIN");
+    if let Some(dir) = last_dir.clone() {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(output_path) = dialog.save_file() else {
         return EditorAction::none();
     };
     let rebuilt = match plan_pzz_save(workspace) {
         Ok(r) => r,
-        Err(e) => return EditorAction::status(format!("PZZ rebuild failed: {e}")),
+        Err(e) => return EditorAction::error(format!("PZZ rebuild failed: {e}")),
     };
     let afs_data = match std::fs::read(afs_path) {
         Ok(d) => d,
-        Err(e) => return EditorAction::status(format!("Failed to read AFS: {e}")),
+        Err(e) => return EditorAction::error(format!("Failed to read AFS: {e}")),
     };
     match crate::afs::patch_entry_bytes(&afs_data, entry_index, &rebuilt) {
         Ok(patched) => match std::fs::write(&output_path, patched) {
-            Ok(()) => EditorAction::status(format!(
-                "Patched AFS entry {} -> {}",
-                entry_index,
-                output_path.display()
-            )),
-            Err(e) => EditorAction::status(format!("Failed to write patched AFS: {e}")),
+            Ok(()) => {
+                super::remember_parent_dir(last_dir, &output_path);
+                EditorAction::status(format!(
+                    "Patched AFS entry {} -> {}",
+                    entry_index,
+                    output_path.display()
+                ))
+            }
+            Err(e) => EditorAction::error(format!("Failed to write patched AFS: {e}")),
         },
-        Err(e) => EditorAction::status(format!("AFS patch failed: {e}")),
+        Err(e) => EditorAction::error(format!("AFS patch failed: {e}")),
     }
 }

@@ -1086,6 +1086,7 @@ dependencies = [
  "roxmltree",
  "serde",
  "serde_json",
+ "ttf-parser",
  "wgpu",
 ]
 

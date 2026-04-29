@@ -17,6 +17,7 @@ wgpu = { version = "27", default-features = false, features = ["wgsl", "dx12", "
 bytemuck = { version = "1", features = ["derive"] }
 rfd = "0.17.2"
 image = "0.25.10"
+ttf-parser = "0.25"
 
 [profile.release]
 opt-level = 3

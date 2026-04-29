@@ -1,5 +1,6 @@
 mod asset_tree;
 mod editors;
+mod fonts;
 mod inspector;
 mod preview;
 mod status;
@@ -15,6 +16,13 @@ use asset_tree::{AssetTreeState, TreeAction};
 use editors::EditorWindows;
 use eframe::egui;
 use eframe::egui_wgpu::wgpu;
+use std::path::Path;
+
+pub(super) fn remember_parent_dir(memory: &mut Option<std::path::PathBuf>, path: &Path) {
+    if let Some(dir) = path.parent() {
+        *memory = Some(dir.to_path_buf());
+    }
+}
 
 pub struct WgpuState {
     pub device: wgpu::Device,
@@ -35,6 +43,14 @@ pub struct GvgModdingApp {
     gpu_texture_bind_group: Option<wgpu::BindGroup>,
     gpu_mesh_stream_index: Option<usize>,
     wgpu_state: Option<WgpuState>,
+    recent_afs_path: Option<std::path::PathBuf>,
+    last_dir_open_afs: Option<std::path::PathBuf>,
+    last_dir_open_pzz: Option<std::path::PathBuf>,
+    last_dir_save_pzz_as: Option<std::path::PathBuf>,
+    last_dir_patch_afs_entry: Option<std::path::PathBuf>,
+    last_dir_save_afs_as: Option<std::path::PathBuf>,
+    /// User-dismissable error dialog; same text is mirrored in `status`.
+    pending_alert: Option<String>,
 }
 
 pub fn run_native() -> eframe::Result<()> {
@@ -69,6 +85,8 @@ impl GvgModdingApp {
                 (None, None)
             };
 
+        fonts::install_cjk_fonts(&cc.egui_ctx);
+
         Self {
             workspace: ModWorkspace::default(),
             tree_state: AssetTreeState::default(),
@@ -82,6 +100,13 @@ impl GvgModdingApp {
             gpu_texture_bind_group: None,
             gpu_mesh_stream_index: None,
             wgpu_state,
+            recent_afs_path: None,
+            last_dir_open_afs: None,
+            last_dir_open_pzz: None,
+            last_dir_save_pzz_as: None,
+            last_dir_patch_afs_entry: None,
+            last_dir_save_afs_as: None,
+            pending_alert: None,
         }
     }
 }
@@ -129,15 +154,52 @@ impl eframe::App for GvgModdingApp {
             self.show_3d_preview(ui, ctx);
         });
 
-        let editor_result =
-            editors::show_editor_windows(ctx, &mut self.workspace, &mut self.editors);
+        let editor_result = editors::show_editor_windows(
+            ctx,
+            &mut self.workspace,
+            &mut self.editors,
+            &mut self.last_dir_save_pzz_as,
+            &mut self.last_dir_patch_afs_entry,
+        );
         if let Some(msg) = editor_result.status {
-            self.status = msg;
+            self.status = msg.clone();
+            if editor_result.error_modal {
+                self.pending_alert = Some(msg);
+            }
         }
+
+        Self::show_error_modal(ctx, &mut self.pending_alert);
     }
 }
 
 impl GvgModdingApp {
+    fn show_error_modal(ctx: &egui::Context, pending: &mut Option<String>) {
+        let Some(message) = pending.clone() else {
+            return;
+        };
+
+        let modal = egui::Modal::new(egui::Id::new("gvg_gui_error_modal")).show(ctx, |ui| {
+            ui.set_min_width(380.0);
+            egui::ScrollArea::vertical()
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    ui.label(&message);
+                });
+            ui.separator();
+            ui.button("OK").clicked()
+        });
+
+        let closed = modal.inner || modal.should_close();
+        if closed {
+            *pending = None;
+        }
+    }
+
+    fn notify_error(&mut self, msg: String) {
+        self.status = msg.clone();
+        self.pending_alert = Some(msg);
+    }
+
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -149,6 +211,16 @@ impl GvgModdingApp {
                     self.open_pzz_dialog();
                     ui.close();
                 }
+                if let Some(recent) = &self.recent_afs_path.clone() {
+                    let label = format!(
+                        "Reopen {}",
+                        recent.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                    );
+                    if ui.button(label).clicked() {
+                        self.open_afs_path(recent.clone());
+                        ui.close();
+                    }
+                }
                 ui.separator();
                 if ui.button("Save PZZ As...").clicked() {
                     self.editors.save_planner = true;
@@ -156,6 +228,11 @@ impl GvgModdingApp {
                 }
                 if ui.button("Patch AFS Entry...").clicked() {
                     self.editors.save_planner = true;
+                    ui.close();
+                }
+                let has_afs = self.workspace.afs_path().is_some();
+                if ui.add_enabled(has_afs, egui::Button::new("Save AFS As...")).clicked() {
+                    self.save_afs_as_dialog();
                     ui.close();
                 }
                 ui.separator();
@@ -171,12 +248,19 @@ impl GvgModdingApp {
     }
 
     fn open_afs_dialog(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("AFS/BIN", &["bin", "afs"])
-            .pick_file()
-        else {
+        let mut dialog = rfd::FileDialog::new().add_filter("AFS/BIN", &["bin", "afs"]);
+        if let Some(dir) = &self.last_dir_open_afs {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else {
             return;
         };
+        self.open_afs_path(path);
+    }
+
+    fn open_afs_path(&mut self, path: std::path::PathBuf) {
+        self.recent_afs_path = Some(path.clone());
+        remember_parent_dir(&mut self.last_dir_open_afs, &path);
         match ModWorkspace::open_afs_file(path) {
             Ok(ws) => {
                 let count = ws.afs_entries().len();
@@ -184,21 +268,65 @@ impl GvgModdingApp {
                 self.tree_state = AssetTreeState::default();
                 self.preview_state = PreviewState::default();
                 self.editors = EditorWindows::default();
+                self.gpu_mesh = None;
+                self.gpu_texture_bind_group = None;
+                self.gpu_mesh_stream_index = None;
                 self.status = format!("Loaded AFS ({} entries)", count);
             }
             Err(e) => {
-                self.status = format!("Failed to open AFS: {e}");
+                self.notify_error(format!("Failed to open AFS: {e}"));
+            }
+        }
+    }
+
+    fn save_afs_as_dialog(&mut self) {
+        let Some(afs_path) = self.workspace.afs_path().cloned() else {
+            self.notify_error("No AFS file is open.".to_owned());
+            return;
+        };
+        let default_name = afs_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("output.bin")
+            .to_string();
+        let mut save_dialog = rfd::FileDialog::new()
+            .add_filter("AFS/BIN", &["bin", "afs"])
+            .set_file_name(&default_name);
+        if let Some(dir) = &self.last_dir_save_afs_as {
+            save_dialog = save_dialog.set_directory(dir);
+        }
+        let Some(output_path) = save_dialog.save_file() else {
+            return;
+        };
+        match copy_afs_with_retry(&afs_path, &output_path) {
+            Ok(bytes) => {
+                remember_parent_dir(&mut self.last_dir_save_afs_as, &output_path);
+                if paths_point_to_same_file(&afs_path, &output_path) {
+                    self.status =
+                        "Save target is the same file as the open AFS (nothing to copy).".to_owned();
+                    return;
+                }
+                self.status = format!(
+                    "Saved AFS ({:.1} MB) -> {}",
+                    bytes as f64 / (1024.0 * 1024.0),
+                    output_path.display()
+                );
+            }
+            Err(e) => {
+                self.notify_error(format!("Failed to save AFS: {e}"));
             }
         }
     }
 
     fn open_pzz_dialog(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PZZ", &["pzz"])
-            .pick_file()
-        else {
+        let mut dialog = rfd::FileDialog::new().add_filter("PZZ", &["pzz"]);
+        if let Some(dir) = &self.last_dir_open_pzz {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else {
             return;
         };
+        remember_parent_dir(&mut self.last_dir_open_pzz, &path);
         match ModWorkspace::open_pzz_file(path) {
             Ok(ws) => {
                 self.workspace = ws;
@@ -208,7 +336,7 @@ impl GvgModdingApp {
                 self.status = "Loaded PZZ".to_string();
             }
             Err(e) => {
-                self.status = format!("Failed to open PZZ: {e}");
+                self.notify_error(format!("Failed to open PZZ: {e}"));
             }
         }
     }
@@ -242,7 +370,7 @@ impl GvgModdingApp {
                         eprintln!("[gui]   => OK: {} streams, expanded_pzz_entry={:?}", stream_count, self.workspace.expanded_pzz_entry());
                     }
                     Err(e) => {
-                        self.status = format!("Failed to open PZZ entry {}: {e}", index);
+                        self.notify_error(format!("Failed to open PZZ entry {}: {e}", index));
                         eprintln!("[gui]   => FAILED: {}", e);
                     }
                 }
@@ -291,7 +419,7 @@ impl GvgModdingApp {
 
     fn export_entry_raw(&mut self, entry_index: usize) {
         let Some(afs_path) = self.workspace.afs_path().cloned() else {
-            self.status = "No AFS file is open".to_string();
+            self.notify_error("No AFS file is open.".to_owned());
             return;
         };
         let Some(entry) = self
@@ -300,7 +428,7 @@ impl GvgModdingApp {
             .iter()
             .find(|e| e.index == entry_index)
         else {
-            self.status = format!("Entry {} not found", entry_index);
+            self.notify_error(format!("Entry {} not found", entry_index));
             return;
         };
         let Some(path) = rfd::FileDialog::new()
@@ -315,18 +443,18 @@ impl GvgModdingApp {
                     self.status = format!("Exported: {}", path.display());
                 }
                 Err(e) => {
-                    self.status = format!("Write failed: {e}");
+                    self.notify_error(format!("Write failed: {e}"));
                 }
             },
             Err(e) => {
-                self.status = format!("Read failed: {e}");
+                self.notify_error(format!("Read failed: {e}"));
             }
         }
     }
 
     fn export_stream_raw(&mut self, stream_index: usize) {
         let Some(data) = self.get_stream_data(stream_index) else {
-            self.status = "Stream not available".to_string();
+            self.notify_error("Stream not available.".to_owned());
             return;
         };
         let name = self
@@ -340,17 +468,17 @@ impl GvgModdingApp {
         };
         match std::fs::write(&path, data) {
             Ok(()) => self.status = format!("Exported: {}", path.display()),
-            Err(e) => self.status = format!("Write failed: {e}"),
+            Err(e) => self.notify_error(format!("Write failed: {e}")),
         }
     }
 
     fn export_stream_dae(&mut self, stream_index: usize) {
         let Some(data) = self.get_stream_data(stream_index) else {
-            self.status = "Stream not available".to_string();
+            self.notify_error("Stream not available.".to_owned());
             return;
         };
         if pzz::classify_stream(data) != "pmf2" {
-            self.status = "Not a PMF2 stream".to_string();
+            self.notify_error("Not a PMF2 stream.".to_owned());
             return;
         }
         let model_name = format!("stream{:03}", stream_index);
@@ -363,7 +491,7 @@ impl GvgModdingApp {
         };
         let (bone_meshes, sections, bbox, _) = pmf2::extract_per_bone_meshes(data, true);
         if bone_meshes.is_empty() {
-            self.status = "No mesh data in PMF2".to_string();
+            self.notify_error("No mesh data in PMF2.".to_owned());
             return;
         }
         match dae::write_dae(&path, &bone_meshes, &sections, &model_name) {
@@ -373,13 +501,13 @@ impl GvgModdingApp {
                 let _ = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap());
                 self.status = format!("Exported DAE: {}", path.display());
             }
-            Err(e) => self.status = format!("DAE export failed: {e}"),
+            Err(e) => self.notify_error(format!("DAE export failed: {e}")),
         }
     }
 
     fn replace_stream_dae(&mut self, stream_index: usize) {
         let Some(template_data) = self.get_stream_data(stream_index).map(|d| d.to_vec()) else {
-            self.status = "Stream not available".to_string();
+            self.notify_error("Stream not available.".to_owned());
             return;
         };
         let Some(path) = rfd::FileDialog::new()
@@ -391,7 +519,7 @@ impl GvgModdingApp {
         let meta = match dae::read_dae_to_meta(&path, None) {
             Ok(m) => m,
             Err(e) => {
-                self.status = format!("DAE import failed: {e}");
+                self.notify_error(format!("DAE import failed: {e}"));
                 return;
             }
         };
@@ -399,25 +527,25 @@ impl GvgModdingApp {
             match pmf2::patch_pmf2_with_mesh_updates(&template_data, &meta, 0.0) {
                 Some(d) => d,
                 None => {
-                    self.status = "Failed to patch PMF2 from DAE".to_string();
+                    self.notify_error("Failed to patch PMF2 from DAE.".to_owned());
                     return;
                 }
             };
         match self.workspace.replace_stream(stream_index, new_pmf2) {
             Ok(()) => self.status = "Replaced PMF2 stream from DAE".to_string(),
-            Err(e) => self.status = format!("Stream replace failed: {e}"),
+            Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
         }
     }
 
     fn export_stream_png(&mut self, stream_index: usize) {
         let Some(data) = self.get_stream_data(stream_index) else {
-            self.status = "Stream not available".to_string();
+            self.notify_error("Stream not available.".to_owned());
             return;
         };
         let image = match crate::texture::GimImage::decode(data) {
             Ok(img) => img,
             Err(e) => {
-                self.status = format!("GIM decode failed: {e}");
+                self.notify_error(format!("GIM decode failed: {e}"));
                 return;
             }
         };
@@ -437,19 +565,19 @@ impl GvgModdingApp {
         }
         match output.save(&path) {
             Ok(()) => self.status = format!("Exported PNG: {}", path.display()),
-            Err(e) => self.status = format!("PNG export failed: {e}"),
+            Err(e) => self.notify_error(format!("PNG export failed: {e}")),
         }
     }
 
     fn replace_stream_png(&mut self, stream_index: usize) {
         let Some(data) = self.get_stream_data(stream_index).map(|d| d.to_vec()) else {
-            self.status = "Stream not available".to_string();
+            self.notify_error("Stream not available.".to_owned());
             return;
         };
         let image = match crate::texture::GimImage::decode(&data) {
             Ok(img) => img,
             Err(e) => {
-                self.status = format!("GIM decode failed: {e}");
+                self.notify_error(format!("GIM decode failed: {e}"));
                 return;
             }
         };
@@ -462,20 +590,20 @@ impl GvgModdingApp {
         let png_data = match std::fs::read(&path) {
             Ok(d) => d,
             Err(e) => {
-                self.status = format!("Failed to read PNG: {e}");
+                self.notify_error(format!("Failed to read PNG: {e}"));
                 return;
             }
         };
         let replaced = match image.replace_png_bytes(&png_data) {
             Ok(d) => d,
             Err(e) => {
-                self.status = format!("GIM replace failed: {e}");
+                self.notify_error(format!("GIM replace failed: {e}"));
                 return;
             }
         };
         match self.workspace.replace_stream(stream_index, replaced) {
             Ok(()) => self.status = "Replaced GIM stream from PNG".to_string(),
-            Err(e) => self.status = format!("Stream replace failed: {e}"),
+            Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
         }
     }
 
@@ -631,4 +759,74 @@ impl GvgModdingApp {
 
         self.gpu_mesh_stream_index = Some(stream_index);
     }
+}
+
+fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn copy_afs_with_retry(src: &Path, dst: &Path) -> std::io::Result<u64> {
+    if paths_point_to_same_file(src, dst) {
+        return Ok(std::fs::metadata(src)?.len());
+    }
+    match std::fs::copy(src, dst) {
+        Ok(n) => Ok(n),
+        Err(e) if retry_copy_via_temp_disk(&e) => copy_via_temp_rename(src, dst),
+        Err(e) => Err(e),
+    }
+}
+
+fn retry_copy_via_temp_disk(e: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        e.raw_os_error() == Some(32)
+    }
+    #[cfg(not(windows))]
+    {
+        matches!(e.kind(), std::io::ErrorKind::ResourceBusy)
+            || matches!(e.kind(), std::io::ErrorKind::PermissionDenied)
+    }
+}
+
+fn copy_via_temp_rename(src: &Path, dst: &Path) -> std::io::Result<u64> {
+    let parent = dst.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination has no parent directory",
+        )
+    })?;
+    let stem = dst
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination file name is invalid",
+        ))?;
+    let tmp = parent.join(format!("_gvgafs_partial_{}.{stem}.tmp", std::process::id()));
+
+    let nbytes =
+        std::fs::copy(src, &tmp).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e
+        })?;
+
+    #[cfg(windows)]
+    if dst.exists() {
+        std::fs::remove_file(dst).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e
+        })?;
+    }
+
+    std::fs::rename(&tmp, dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e
+    })?;
+    Ok(nbytes)
 }
