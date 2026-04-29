@@ -61,6 +61,14 @@ pub struct GvgModdingApp {
     last_dir_save_pzz_as: Option<std::path::PathBuf>,
     last_dir_patch_afs_entry: Option<std::path::PathBuf>,
     last_dir_save_afs_as: Option<std::path::PathBuf>,
+    last_dir_write_modified_pzz_to_afs: Option<std::path::PathBuf>,
+    last_dir_export_entry_raw: Option<std::path::PathBuf>,
+    last_dir_export_stream_raw: Option<std::path::PathBuf>,
+    last_dir_export_stream_dae: Option<std::path::PathBuf>,
+    last_dir_replace_stream_dae: Option<std::path::PathBuf>,
+    last_dir_replace_stream_pmf2: Option<std::path::PathBuf>,
+    last_dir_export_stream_png: Option<std::path::PathBuf>,
+    last_dir_replace_stream_png: Option<std::path::PathBuf>,
     gui_state_dirty: bool,
     /// User-dismissable error dialog; same text is mirrored in `status`.
     pending_alert: Option<String>,
@@ -123,6 +131,14 @@ impl GvgModdingApp {
             last_dir_save_pzz_as: persisted.last_dir_save_pzz_as,
             last_dir_patch_afs_entry: persisted.last_dir_patch_afs_entry,
             last_dir_save_afs_as: persisted.last_dir_save_afs_as,
+            last_dir_write_modified_pzz_to_afs: persisted.last_dir_write_modified_pzz_to_afs,
+            last_dir_export_entry_raw: persisted.last_dir_export_entry_raw,
+            last_dir_export_stream_raw: persisted.last_dir_export_stream_raw,
+            last_dir_export_stream_dae: persisted.last_dir_export_stream_dae,
+            last_dir_replace_stream_dae: persisted.last_dir_replace_stream_dae,
+            last_dir_replace_stream_pmf2: persisted.last_dir_replace_stream_pmf2,
+            last_dir_export_stream_png: persisted.last_dir_export_stream_png,
+            last_dir_replace_stream_png: persisted.last_dir_replace_stream_png,
             gui_state_dirty: false,
             pending_alert: None,
         }
@@ -178,6 +194,8 @@ impl eframe::App for GvgModdingApp {
             &mut self.editors,
             &mut self.last_dir_save_pzz_as,
             &mut self.last_dir_patch_afs_entry,
+            &mut self.last_dir_export_stream_png,
+            &mut self.last_dir_replace_stream_png,
         );
         self.gui_state_dirty |= editor_result.dirs_changed;
         if editor_result.preview_changed {
@@ -240,6 +258,14 @@ impl GvgModdingApp {
             last_dir_save_pzz_as: self.last_dir_save_pzz_as.clone(),
             last_dir_patch_afs_entry: self.last_dir_patch_afs_entry.clone(),
             last_dir_save_afs_as: self.last_dir_save_afs_as.clone(),
+            last_dir_write_modified_pzz_to_afs: self.last_dir_write_modified_pzz_to_afs.clone(),
+            last_dir_export_entry_raw: self.last_dir_export_entry_raw.clone(),
+            last_dir_export_stream_raw: self.last_dir_export_stream_raw.clone(),
+            last_dir_export_stream_dae: self.last_dir_export_stream_dae.clone(),
+            last_dir_replace_stream_dae: self.last_dir_replace_stream_dae.clone(),
+            last_dir_replace_stream_pmf2: self.last_dir_replace_stream_pmf2.clone(),
+            last_dir_export_stream_png: self.last_dir_export_stream_png.clone(),
+            last_dir_replace_stream_png: self.last_dir_replace_stream_png.clone(),
             recent_afs_paths: self.recent_afs_paths.clone(),
         }
     }
@@ -445,7 +471,7 @@ impl GvgModdingApp {
         let mut save_dialog = rfd::FileDialog::new()
             .add_filter("AFS/BIN", &["bin", "afs"])
             .set_file_name(&default_name);
-        if let Some(dir) = &self.last_dir_save_afs_as {
+        if let Some(dir) = &self.last_dir_write_modified_pzz_to_afs {
             save_dialog = save_dialog.set_directory(dir);
         }
         let Some(output_path) = save_dialog.save_file() else {
@@ -466,16 +492,16 @@ impl GvgModdingApp {
         ) {
             Ok(byte_count) => {
                 touch_dialog_dir_parent(
-                    &mut self.last_dir_save_afs_as,
+                    &mut self.last_dir_write_modified_pzz_to_afs,
                     &output_path,
                     &mut self.gui_state_dirty,
                 );
-                self.workspace.clear_staged_pzz_and_close();
-                self.tree_state.selected_stream = None;
-                self.preview_state = PreviewState::default();
-                self.gpu_mesh = None;
-                self.gpu_texture_bind_group = None;
-                self.gpu_mesh_stream_index = None;
+                self.workspace.push_log(format!(
+                    "Wrote {} modified PZZ entries ({:.1} MB) -> {}",
+                    dirty_count,
+                    byte_count as f64 / (1024.0 * 1024.0),
+                    output_path.display()
+                ));
                 self.status = format!(
                     "Wrote {} modified PZZ entries ({:.1} MB) -> {}",
                     dirty_count,
@@ -571,6 +597,9 @@ impl GvgModdingApp {
             TreeAction::ReplaceStreamDae(index) => {
                 self.replace_stream_dae(index);
             }
+            TreeAction::ReplaceStreamPmf2(index) => {
+                self.replace_stream_pmf2(index);
+            }
             TreeAction::ExportStreamPng(index) => {
                 self.export_stream_png(index);
             }
@@ -609,12 +638,18 @@ impl GvgModdingApp {
             self.notify_error(format!("Entry {} not found", entry_index));
             return;
         };
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&entry.name)
-            .save_file()
-        else {
+        let mut dialog = rfd::FileDialog::new().set_file_name(&entry.name);
+        if let Some(dir) = &self.last_dir_export_entry_raw {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
             return;
         };
+        touch_dialog_dir_parent(
+            &mut self.last_dir_export_entry_raw,
+            &path,
+            &mut self.gui_state_dirty,
+        );
         match afs::read_entry_from_file(&afs_path, entry.offset, entry.size) {
             Ok(data) => match std::fs::write(&path, &data) {
                 Ok(()) => {
@@ -631,7 +666,7 @@ impl GvgModdingApp {
     }
 
     fn export_stream_raw(&mut self, stream_index: usize) {
-        let Some(data) = self.get_stream_data(stream_index) else {
+        let Some(data) = self.get_stream_data(stream_index).map(|d| d.to_vec()) else {
             self.notify_error("Stream not available.".to_owned());
             return;
         };
@@ -641,9 +676,18 @@ impl GvgModdingApp {
             .and_then(|p| p.streams().get(stream_index))
             .map(|s| s.name.clone())
             .unwrap_or_else(|| format!("stream{:03}.bin", stream_index));
-        let Some(path) = rfd::FileDialog::new().set_file_name(&name).save_file() else {
+        let mut dialog = rfd::FileDialog::new().set_file_name(&name);
+        if let Some(dir) = &self.last_dir_export_stream_raw {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
             return;
         };
+        touch_dialog_dir_parent(
+            &mut self.last_dir_export_stream_raw,
+            &path,
+            &mut self.gui_state_dirty,
+        );
         match std::fs::write(&path, data) {
             Ok(()) => self.status = format!("Exported: {}", path.display()),
             Err(e) => self.notify_error(format!("Write failed: {e}")),
@@ -651,23 +695,30 @@ impl GvgModdingApp {
     }
 
     fn export_stream_dae(&mut self, stream_index: usize) {
-        let Some(data) = self.get_stream_data(stream_index) else {
+        let Some(data) = self.get_stream_data(stream_index).map(|d| d.to_vec()) else {
             self.notify_error("Stream not available.".to_owned());
             return;
         };
-        if pzz::classify_stream(data) != "pmf2" {
+        if pzz::classify_stream(&data) != "pmf2" {
             self.notify_error("Not a PMF2 stream.".to_owned());
             return;
         }
         let model_name = format!("stream{:03}", stream_index);
-        let Some(path) = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .add_filter("DAE", &["dae"])
-            .set_file_name(&format!("{}.dae", model_name))
-            .save_file()
-        else {
+            .set_file_name(&format!("{}.dae", model_name));
+        if let Some(dir) = &self.last_dir_export_stream_dae {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
             return;
         };
-        let (bone_meshes, sections, bbox, _) = pmf2::extract_per_bone_meshes(data, true);
+        touch_dialog_dir_parent(
+            &mut self.last_dir_export_stream_dae,
+            &path,
+            &mut self.gui_state_dirty,
+        );
+        let (bone_meshes, sections, bbox, _) = pmf2::extract_per_bone_meshes(&data, true);
         if bone_meshes.is_empty() {
             self.notify_error("No mesh data in PMF2.".to_owned());
             return;
@@ -688,12 +739,18 @@ impl GvgModdingApp {
             self.notify_error("Stream not available.".to_owned());
             return;
         };
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("DAE", &["dae"])
-            .pick_file()
-        else {
+        let mut dialog = rfd::FileDialog::new().add_filter("DAE", &["dae"]);
+        if let Some(dir) = &self.last_dir_replace_stream_dae {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else {
             return;
         };
+        touch_dialog_dir_parent(
+            &mut self.last_dir_replace_stream_dae,
+            &path,
+            &mut self.gui_state_dirty,
+        );
         let meta = match dae::read_dae_to_meta(&path, None) {
             Ok(m) => m,
             Err(e) => {
@@ -709,30 +766,79 @@ impl GvgModdingApp {
             }
         };
         match self.workspace.replace_stream(stream_index, new_pmf2) {
-            Ok(()) => self.status = "Replaced PMF2 stream from DAE".to_string(),
+            Ok(()) => {
+                self.gpu_mesh_stream_index = None;
+                self.status = "Replaced PMF2 stream from DAE".to_string();
+            }
+            Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
+        }
+    }
+
+    fn replace_stream_pmf2(&mut self, stream_index: usize) {
+        let Some(_) = self.get_stream_data(stream_index) else {
+            self.notify_error("Stream not available.".to_owned());
+            return;
+        };
+        let mut dialog = rfd::FileDialog::new().add_filter("PMF2", &["pmf2"]);
+        if let Some(dir) = &self.last_dir_replace_stream_pmf2 {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        touch_dialog_dir_parent(
+            &mut self.last_dir_replace_stream_pmf2,
+            &path,
+            &mut self.gui_state_dirty,
+        );
+        let new_pmf2 = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.notify_error(format!("Failed to read PMF2 file: {e}"));
+                return;
+            }
+        };
+        if pzz::classify_stream(&new_pmf2) != "pmf2" {
+            self.notify_error(
+                "Selected file is not PMF2 (first 4 bytes must be \"PMF2\").".to_owned(),
+            );
+            return;
+        }
+        match self.workspace.replace_stream(stream_index, new_pmf2) {
+            Ok(()) => {
+                self.gpu_mesh_stream_index = None;
+                self.status = format!("Replaced PMF2 stream from {}", path.display());
+            }
             Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
         }
     }
 
     fn export_stream_png(&mut self, stream_index: usize) {
-        let Some(data) = self.get_stream_data(stream_index) else {
+        let Some(data) = self.get_stream_data(stream_index).map(|d| d.to_vec()) else {
             self.notify_error("Stream not available.".to_owned());
             return;
         };
-        let image = match crate::texture::GimImage::decode(data) {
+        let image = match crate::texture::GimImage::decode(&data) {
             Ok(img) => img,
             Err(e) => {
                 self.notify_error(format!("GIM decode failed: {e}"));
                 return;
             }
         };
-        let Some(path) = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .add_filter("PNG", &["png"])
-            .set_file_name("texture.png")
-            .save_file()
-        else {
+            .set_file_name("texture.png");
+        if let Some(dir) = &self.last_dir_export_stream_png {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
             return;
         };
+        touch_dialog_dir_parent(
+            &mut self.last_dir_export_stream_png,
+            &path,
+            &mut self.gui_state_dirty,
+        );
         let mut output =
             image::RgbaImage::new(image.metadata.width as u32, image.metadata.height as u32);
         for (i, pixel) in image.rgba.iter().enumerate() {
@@ -758,12 +864,18 @@ impl GvgModdingApp {
                 return;
             }
         };
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
-            .pick_file()
-        else {
+        let mut dialog = rfd::FileDialog::new().add_filter("PNG", &["png"]);
+        if let Some(dir) = &self.last_dir_replace_stream_png {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else {
             return;
         };
+        touch_dialog_dir_parent(
+            &mut self.last_dir_replace_stream_png,
+            &path,
+            &mut self.gui_state_dirty,
+        );
         let png_data = match std::fs::read(&path) {
             Ok(d) => d,
             Err(e) => {

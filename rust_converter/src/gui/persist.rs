@@ -18,6 +18,22 @@ pub struct PersistedGuiState {
     #[serde(default)]
     pub last_dir_save_afs_as: Option<PathBuf>,
     #[serde(default)]
+    pub last_dir_write_modified_pzz_to_afs: Option<PathBuf>,
+    #[serde(default)]
+    pub last_dir_export_entry_raw: Option<PathBuf>,
+    #[serde(default)]
+    pub last_dir_export_stream_raw: Option<PathBuf>,
+    #[serde(default)]
+    pub last_dir_export_stream_dae: Option<PathBuf>,
+    #[serde(default)]
+    pub last_dir_replace_stream_dae: Option<PathBuf>,
+    #[serde(default)]
+    pub last_dir_replace_stream_pmf2: Option<PathBuf>,
+    #[serde(default)]
+    pub last_dir_export_stream_png: Option<PathBuf>,
+    #[serde(default)]
+    pub last_dir_replace_stream_png: Option<PathBuf>,
+    #[serde(default)]
     pub recent_afs_paths: Vec<PathBuf>,
 }
 

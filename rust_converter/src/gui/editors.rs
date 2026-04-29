@@ -93,6 +93,8 @@ pub fn show_editor_windows(
     editors: &mut EditorWindows,
     last_dir_save_pzz_as: &mut Option<PathBuf>,
     last_dir_patch_afs_entry: &mut Option<PathBuf>,
+    last_dir_export_stream_png: &mut Option<PathBuf>,
+    last_dir_replace_stream_png: &mut Option<PathBuf>,
 ) -> EditorAction {
     let mut action = EditorAction::none();
 
@@ -139,7 +141,13 @@ pub fn show_editor_windows(
             .default_size([420.0, 400.0])
             .resizable(true)
             .show(ctx, |ui| {
-                if let Some(result) = show_gim_preview_editor(ui, workspace, stream_index) {
+                if let Some(result) = show_gim_preview_editor(
+                    ui,
+                    workspace,
+                    stream_index,
+                    last_dir_export_stream_png,
+                    last_dir_replace_stream_png,
+                ) {
                     action.accumulate_from(result);
                 }
             });
@@ -353,6 +361,8 @@ fn show_gim_preview_editor(
     ui: &mut egui::Ui,
     workspace: &mut ModWorkspace,
     stream_index: usize,
+    last_dir_export_stream_png: &mut Option<PathBuf>,
+    last_dir_replace_stream_png: &mut Option<PathBuf>,
 ) -> Option<EditorAction> {
     let data = workspace
         .open_pzz()
@@ -389,10 +399,15 @@ fn show_gim_preview_editor(
     let mut result = None;
     ui.horizontal(|ui| {
         if ui.button("Export PNG").clicked() {
-            result = Some(export_gim_png(&image));
+            result = Some(export_gim_png(&image, last_dir_export_stream_png));
         }
         if ui.button("Replace from PNG").clicked() {
-            result = Some(replace_gim_png(&image, workspace, stream_index));
+            result = Some(replace_gim_png(
+                &image,
+                workspace,
+                stream_index,
+                last_dir_replace_stream_png,
+            ));
         }
     });
     ui.separator();
@@ -412,12 +427,14 @@ fn show_gim_preview_editor(
     result
 }
 
-fn export_gim_png(image: &GimImage) -> EditorAction {
-    let Some(path) = rfd::FileDialog::new()
+fn export_gim_png(image: &GimImage, last_dir: &mut Option<PathBuf>) -> EditorAction {
+    let mut dialog = rfd::FileDialog::new()
         .add_filter("PNG", &["png"])
-        .set_file_name("texture.png")
-        .save_file()
-    else {
+        .set_file_name("texture.png");
+    if let Some(dir) = last_dir.clone() {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(path) = dialog.save_file() else {
         return EditorAction::none();
     };
     let mut output =
@@ -428,7 +445,10 @@ fn export_gim_png(image: &GimImage) -> EditorAction {
         output.put_pixel(x, y, image::Rgba(*pixel));
     }
     match output.save(&path) {
-        Ok(()) => EditorAction::status(format!("Exported PNG: {}", path.display())),
+        Ok(()) => {
+            super::remember_parent_dir(last_dir, &path);
+            EditorAction::status_touch_dirs(format!("Exported PNG: {}", path.display()))
+        }
         Err(e) => EditorAction::error(format!("PNG export failed: {e}")),
     }
 }
@@ -437,24 +457,46 @@ fn replace_gim_png(
     image: &GimImage,
     workspace: &mut ModWorkspace,
     stream_index: usize,
+    last_dir: &mut Option<PathBuf>,
 ) -> EditorAction {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("PNG", &["png"])
-        .pick_file()
-    else {
+    let mut dialog = rfd::FileDialog::new().add_filter("PNG", &["png"]);
+    if let Some(dir) = last_dir.clone() {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(path) = dialog.pick_file() else {
         return EditorAction::none();
     };
+    super::remember_parent_dir(last_dir, &path);
     let png_data = match std::fs::read(&path) {
         Ok(d) => d,
-        Err(e) => return EditorAction::error(format!("Failed to read PNG: {e}")),
+        Err(e) => {
+            return EditorAction {
+                status: Some(format!("Failed to read PNG: {e}")),
+                error_modal: true,
+                dirs_changed: true,
+                preview_changed: false,
+            };
+        }
     };
     let replaced = match image.replace_png_bytes(&png_data) {
         Ok(d) => d,
-        Err(e) => return EditorAction::error(format!("GIM replace failed: {e}")),
+        Err(e) => {
+            return EditorAction {
+                status: Some(format!("GIM replace failed: {e}")),
+                error_modal: true,
+                dirs_changed: true,
+                preview_changed: false,
+            };
+        }
     };
     match workspace.replace_stream(stream_index, replaced) {
-        Ok(()) => EditorAction::status("Replaced GIM stream from PNG".to_string()),
-        Err(e) => EditorAction::error(format!("Stream replace failed: {e}")),
+        Ok(()) => EditorAction::status_touch_dirs("Replaced GIM stream from PNG".to_string()),
+        Err(e) => EditorAction {
+            status: Some(format!("Stream replace failed: {e}")),
+            error_modal: true,
+            dirs_changed: true,
+            preview_changed: false,
+        },
     }
 }
 

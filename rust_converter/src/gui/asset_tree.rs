@@ -9,6 +9,7 @@ pub enum TreeAction {
     ExportEntryRaw(usize),
     ExportStreamDae(usize),
     ReplaceStreamDae(usize),
+    ReplaceStreamPmf2(usize),
     ExportStreamPng(usize),
     ReplaceStreamPng(usize),
     ExportStreamRaw(usize),
@@ -229,6 +230,10 @@ fn stream_context_menu(
             }
             if ui.button("Replace from DAE").clicked() {
                 actions.push(TreeAction::ReplaceStreamDae(index));
+                ui.close();
+            }
+            if ui.button("Replace from PMF2 file").clicked() {
+                actions.push(TreeAction::ReplaceStreamPmf2(index));
                 ui.close();
             }
             ui.separator();

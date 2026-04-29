@@ -286,12 +286,6 @@ impl ModWorkspace {
         self.expanded_pzz_entry = None;
     }
 
-    pub fn clear_staged_pzz_and_close(&mut self) {
-        self.staged_pzz.clear();
-        self.open_pzz = None;
-        self.expanded_pzz_entry = None;
-    }
-
     pub fn replace_stream(&mut self, index: usize, data: Vec<u8>) -> Result<()> {
         let pzz = self
             .open_pzz
