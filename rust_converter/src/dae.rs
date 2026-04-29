@@ -715,8 +715,8 @@ struct ControllerData {
 }
 
 pub fn read_dae_to_meta(path: &Path, model_name: Option<&str>) -> Result<Pmf2Meta> {
-    let xml =
-        std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let xml = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     let name = model_name
         .map(ToOwned::to_owned)
         .or_else(|| {
@@ -815,20 +815,22 @@ fn parse_dae_to_meta_text(xml: &str, model_name: &str) -> Result<Pmf2Meta> {
             local_vertices.push([lx, ly, lz, v[3], v[4], lnx, lny, lnz]);
         }
 
-        let entry = mesh_by_bone.entry(bone_index).or_insert_with(|| BoneMeshMeta {
-            bone_index,
-            bone_name: section_names
-                .get(&bone_index)
-                .cloned()
-                .unwrap_or_else(|| format!("bone_{}", bone_index)),
-            vertex_count: 0,
-            face_count: 0,
-            has_uv: geom.has_uv,
-            has_normals: geom.has_normals,
-            draw_call_vtypes: Vec::new(),
-            local_vertices: Vec::new(),
-            faces: Vec::new(),
-        });
+        let entry = mesh_by_bone
+            .entry(bone_index)
+            .or_insert_with(|| BoneMeshMeta {
+                bone_index,
+                bone_name: section_names
+                    .get(&bone_index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("bone_{}", bone_index)),
+                vertex_count: 0,
+                face_count: 0,
+                has_uv: geom.has_uv,
+                has_normals: geom.has_normals,
+                draw_call_vtypes: Vec::new(),
+                local_vertices: Vec::new(),
+                faces: Vec::new(),
+            });
         entry.has_uv |= geom.has_uv;
         entry.has_normals |= geom.has_normals;
         let base = entry.local_vertices.len();
@@ -917,8 +919,7 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
                             .insert(vertices_id.to_string(), trim_hash(src).to_string());
                     }
                     "TEXCOORD" => {
-                        vertices_to_uv
-                            .insert(vertices_id.to_string(), trim_hash(src).to_string());
+                        vertices_to_uv.insert(vertices_id.to_string(), trim_hash(src).to_string());
                     }
                     _ => {}
                 }
@@ -996,7 +997,7 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
                 continue;
             };
             let p_values = parse_usize_list(p_node.text().unwrap_or(""));
-            if p_values.is_empty() || p_values.len() % stride != 0 {
+            if p_values.is_empty() || !p_values.len().is_multiple_of(stride) {
                 continue;
             }
 
@@ -1289,7 +1290,7 @@ fn parse_joint_index_hint(node: Node<'_, '_>) -> Option<usize> {
     None
 }
 
-fn normalize_sections(sections: &mut Vec<BoneSection>) {
+fn normalize_sections(sections: &mut [BoneSection]) {
     if sections.is_empty() {
         return;
     }
@@ -1453,7 +1454,8 @@ fn collect_mesh_bindings(
             .children()
             .filter(|n| n.is_element() && n.tag_name().name() == "instance_geometry")
         {
-            let geometry_id = trim_hash(instance_geometry.attribute("url").unwrap_or("")).to_string();
+            let geometry_id =
+                trim_hash(instance_geometry.attribute("url").unwrap_or("")).to_string();
             if !geometries.contains_key(&geometry_id) {
                 continue;
             }
@@ -1528,7 +1530,11 @@ fn match_bone_from_name(name: &str, sections: &[BoneSection]) -> Option<usize> {
     None
 }
 
-fn read_source_vec3(sources: &HashMap<String, SourceData>, source_id: &str, index: usize) -> [f32; 3] {
+fn read_source_vec3(
+    sources: &HashMap<String, SourceData>,
+    source_id: &str,
+    index: usize,
+) -> [f32; 3] {
     let Some(source) = sources.get(source_id) else {
         return [0.0, 0.0, 0.0];
     };
@@ -1546,7 +1552,11 @@ fn read_source_vec3(sources: &HashMap<String, SourceData>, source_id: &str, inde
     [x, y, z]
 }
 
-fn read_source_vec2(sources: &HashMap<String, SourceData>, source_id: &str, index: usize) -> [f32; 2] {
+fn read_source_vec2(
+    sources: &HashMap<String, SourceData>,
+    source_id: &str,
+    index: usize,
+) -> [f32; 2] {
     let Some(source) = sources.get(source_id) else {
         return [0.0, 0.0];
     };
@@ -1588,8 +1598,8 @@ fn row_major_to_col_major_f32(m: &[f32; 16]) -> [f32; 16] {
 
 fn col_major_to_row_major_f32(values: &[f32]) -> [f32; 16] {
     let mut m = [0.0f32; 16];
-    for i in 0..16 {
-        m[i] = values.get(i).copied().unwrap_or(0.0);
+    for (i, value) in m.iter_mut().enumerate() {
+        *value = values.get(i).copied().unwrap_or(0.0);
     }
     row_major_to_col_major_f32(&m)
 }
@@ -1838,7 +1848,8 @@ mod tests {
         assert_eq!(meta.sections.len(), 2);
         assert!(!meta.bone_meshes.is_empty());
         let rebuilt = crate::pmf2::rebuild_pmf2(&meta);
-        let (parsed_meshes, parsed_sections, _, _) = crate::pmf2::extract_per_bone_meshes(&rebuilt, false);
+        let (parsed_meshes, parsed_sections, _, _) =
+            crate::pmf2::extract_per_bone_meshes(&rebuilt, false);
         assert_eq!(parsed_sections.len(), 2);
         assert!(!parsed_meshes.is_empty());
     }

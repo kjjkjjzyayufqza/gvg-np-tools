@@ -1,10 +1,6 @@
-mod afs;
-mod dae;
-mod pmf2;
-mod pzz;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use gvg_converter::{afs, dae, pmf2, pzz, save::PzzSavePlanner};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -55,7 +51,10 @@ enum Commands {
         out: Option<PathBuf>,
         #[arg(long, help = "Model name")]
         name: Option<String>,
-        #[arg(long, help = "Use original PMF2 as template and patch bone matrices only")]
+        #[arg(
+            long,
+            help = "Use original PMF2 as template and patch bone matrices only"
+        )]
         template_pmf2: Option<PathBuf>,
         #[arg(
             long,
@@ -342,14 +341,13 @@ fn cmd_dae_to_pmf2(
                     "Template bbox too small for imported mesh, keeping template PMF2 layout and template bbox"
                 );
             }
-            pmf2::patch_pmf2_with_mesh_updates(&template, &meta, matrix_delta_threshold).ok_or_else(
-                || {
+            pmf2::patch_pmf2_with_mesh_updates(&template, &meta, matrix_delta_threshold)
+                .ok_or_else(|| {
                     anyhow::anyhow!(
                         "failed to patch template PMF2 with DAE transforms: {}",
                         template_path.display()
                     )
-                },
-            )?
+                })?
         } else {
             pmf2::patch_pmf2_transforms_from_meta_with_threshold(
                 &template,
@@ -400,17 +398,17 @@ fn cmd_repack_pzz(
         anyhow::bail!("No streams found in original PZZ");
     }
     let mut replaced = 0usize;
-    for i in 0..streams.len() {
+    for (i, stream) in streams.iter_mut().enumerate() {
         if let Some(path) = find_stream_override_path(streams_dir, i)? {
-            streams[i] = std::fs::read(&path)?;
+            *stream = std::fs::read(&path)?;
             replaced += 1;
             eprintln!("  replaced stream{:03} <- {}", i, path.display());
         }
     }
-    let rebuilt = pzz::rebuild_pzz_from_original(&original, &streams).unwrap_or_else(|| {
-        let key = pzz::find_pzz_key(&original).unwrap_or(0x12345678);
-        pzz::build_pzz(&streams, key)
-    });
+    let stream_count = streams.len();
+    let rebuilt = PzzSavePlanner::new(&original, streams)
+        .plan_preserving_layout()?
+        .rebuilt_pzz;
     let out_path = match out {
         Some(p) => p.to_path_buf(),
         None => {
@@ -427,7 +425,7 @@ fn cmd_repack_pzz(
     std::fs::write(&out_path, &rebuilt)?;
     eprintln!(
         "Repacked PZZ: streams={} replaced={} -> {}",
-        streams.len(),
+        stream_count,
         replaced,
         out_path.display()
     );
@@ -592,7 +590,7 @@ fn cmd_pipeline(
     let pzz_data = afs::read_entry(z_bin, entry)?;
     std::fs::create_dir_all(out_dir)?;
     cleanup_pipeline_artifacts(out_dir, pzz_name)?;
-    let pzz_out = out_dir.join(format!("original_{}", pzz_name.replace(".pzz", ".pzz")));
+    let pzz_out = out_dir.join(format!("original_{}", pzz_name));
     std::fs::write(&pzz_out, &pzz_data)?;
     eprintln!("  Read {} bytes -> {}", pzz_data.len(), pzz_out.display());
 
@@ -645,10 +643,9 @@ fn cmd_pipeline(
     }
 
     eprintln!("\n=== 5. Repack PZZ ===");
-    let new_pzz = pzz::rebuild_pzz_from_original(&pzz_data, &rebuilt_streams).unwrap_or_else(|| {
-        let key = pzz::find_pzz_key(&pzz_data).unwrap_or(0x12345678);
-        pzz::build_pzz(&rebuilt_streams, key)
-    });
+    let new_pzz = PzzSavePlanner::new(&pzz_data, rebuilt_streams)
+        .plan_preserving_layout()?
+        .rebuilt_pzz;
     let new_pzz_path = out_dir.join(format!("rebuilt_{}", pzz_name));
     std::fs::write(&new_pzz_path, &new_pzz)?;
     eprintln!("  {} -> {} bytes", pzz_data.len(), new_pzz.len());
@@ -754,7 +751,7 @@ fn resolve_pzz_output_path(
 }
 
 fn cleanup_pipeline_artifacts(out_dir: &std::path::Path, pzz_name: &str) -> Result<()> {
-    let original = out_dir.join(format!("original_{}", pzz_name.replace(".pzz", ".pzz")));
+    let original = out_dir.join(format!("original_{}", pzz_name));
     if original.exists() {
         std::fs::remove_file(original)?;
     }

@@ -11,6 +11,11 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 fbxcel = { version = "0.9.0", features = ["writer"] }
 roxmltree = "0.21.1"
+eframe = "0.33.3"
+egui = "0.33.3"
+egui_dock = "0.18.0"
+rfd = "0.17.2"
+image = "0.25.10"
 
 [profile.release]
 opt-level = 3

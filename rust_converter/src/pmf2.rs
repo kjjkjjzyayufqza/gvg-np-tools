@@ -512,15 +512,14 @@ pub struct BoneMeshData {
     pub vtypes: Vec<u32>,
 }
 
-pub fn extract_per_bone_meshes(
-    pmf2_data: &[u8],
-    swap_yz: bool,
-) -> (
+pub type ExtractedPmf2Meshes = (
     Vec<BoneMeshData>,
     Vec<BoneSection>,
     [f32; 3],
     HashMap<usize, Vec<f32>>,
-) {
+);
+
+pub fn extract_per_bone_meshes(pmf2_data: &[u8], swap_yz: bool) -> ExtractedPmf2Meshes {
     let (sections, bbox) = parse_pmf2_sections(pmf2_data);
     if sections.is_empty() {
         return (vec![], vec![], [1.0, 1.0, 1.0], HashMap::new());
@@ -598,13 +597,13 @@ pub fn extract_per_bone_meshes(
                 let mut rv = Vec::new();
                 let mut valid = true;
                 for &idx_val in &indices {
-                    if !cache.contains_key(&idx_val) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(idx_val) {
                         match decode_vertex(pmf2_data, dc.vaddr + idx_val * vs, vt) {
                             Some(mut pv) => {
                                 pv.x *= sx;
                                 pv.y *= sy;
                                 pv.z *= sz;
-                                cache.insert(idx_val, pv);
+                                entry.insert(pv);
                             }
                             None => {
                                 valid = false;
@@ -786,15 +785,17 @@ pub fn build_meta(
 }
 
 fn clamp_i16(val: i32) -> i16 {
-    val.max(-32768).min(32767) as i16
+    val.clamp(-32768, 32767) as i16
 }
+
+type EncodedVertex = (i16, i16, i16, i16, i16, i16, i16, i16);
 
 fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
     let sx = bbox[0] / 32768.0;
     let sy = bbox[1] / 32768.0;
     let sz = bbox[2] / 32768.0;
 
-    let verts_i16: Vec<(i16, i16, i16, i16, i16, i16, i16, i16)> = mesh
+    let verts_i16: Vec<EncodedVertex> = mesh
         .local_vertices
         .iter()
         .map(|lv| {
@@ -835,20 +836,13 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
     }
 
     let mut vtype: u32 = 0;
-    let mut stride = 0usize;
     if mesh.has_uv {
         vtype |= 2;
-        stride += 4;
     }
     if mesh.has_normals {
         vtype |= 2 << 5;
-        stride += 6;
     }
     vtype |= 2 << 7;
-    stride += 6;
-    if stride % 2 != 0 {
-        stride += 1;
-    }
 
     let num_cmds = 2 + 3 + 1;
     let cmd_block_size = num_cmds * 4;
@@ -915,8 +909,8 @@ pub fn rebuild_pmf2(meta: &Pmf2Meta) -> Vec<u8> {
         } else {
             sec_buf[0x7C..0x80].copy_from_slice(&(sm.parent as u32).to_le_bytes());
         }
-        for i in 0xC0..0x100 {
-            sec_buf[i] = 0xFF;
+        for byte in sec_buf.iter_mut().take(0x100).skip(0xC0) {
+            *byte = 0xFF;
         }
 
         let mesh_for_section = meta.bone_meshes.iter().find(|bm| bm.bone_index == sm.index);
@@ -932,14 +926,14 @@ pub fn rebuild_pmf2(meta: &Pmf2Meta) -> Vec<u8> {
                 sec_buf.extend_from_slice(&ge_data);
             }
         }
-        while sec_buf.len() % 16 != 0 {
+        while !sec_buf.len().is_multiple_of(16) {
             sec_buf.push(0);
         }
         section_data_list.push(sec_buf);
     }
 
     let mut header_size = 0x20 + num_sec * 4;
-    while header_size % 16 != 0 {
+    while !header_size.is_multiple_of(16) {
         header_size += 4;
     }
 
@@ -1039,9 +1033,8 @@ pub fn patch_pmf2_with_mesh_updates(
         let template_had_mesh = tsec.has_mesh && orig_faces > 0;
 
         let mut sec_buf = header;
-        if src_mesh.is_some() && dae_face_count > 0 {
+        if let Some(mesh) = src_mesh.filter(|_| dae_face_count > 0) {
             if dae_face_count != orig_faces {
-                let mesh = src_mesh.unwrap();
                 let ge_data = build_ge_commands(mesh, bbox);
                 if !ge_data.is_empty() {
                     if !template_had_mesh {
@@ -1069,14 +1062,14 @@ pub fn patch_pmf2_with_mesh_updates(
             sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
         }
 
-        while sec_buf.len() % 16 != 0 {
+        while !sec_buf.len().is_multiple_of(16) {
             sec_buf.push(0);
         }
         section_data_list.push(sec_buf);
     }
 
     let mut header_size = 0x20 + num_sec * 4;
-    while header_size % 16 != 0 {
+    while !header_size.is_multiple_of(16) {
         header_size += 4;
     }
 
