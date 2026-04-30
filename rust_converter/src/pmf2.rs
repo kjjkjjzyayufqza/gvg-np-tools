@@ -927,6 +927,185 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
     ge
 }
 
+fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshMeta> {
+    if face_start >= mesh.faces.len() {
+        return None;
+    }
+
+    let mut remap: HashMap<usize, usize> = HashMap::new();
+    let mut local_vertices = Vec::new();
+    let mut faces = Vec::new();
+    for face in &mesh.faces[face_start..] {
+        let mut out_face = [0usize; 3];
+        for (dst, &src_idx) in out_face.iter_mut().zip(face.iter()) {
+            if src_idx >= mesh.local_vertices.len() {
+                return None;
+            }
+            let next_idx = remap.len();
+            let mapped = *remap.entry(src_idx).or_insert_with(|| {
+                local_vertices.push(mesh.local_vertices[src_idx]);
+                next_idx
+            });
+            *dst = mapped;
+        }
+        faces.push(out_face);
+    }
+
+    Some(BoneMeshMeta {
+        bone_index: mesh.bone_index,
+        bone_name: mesh.bone_name.clone(),
+        vertex_count: local_vertices.len(),
+        face_count: faces.len(),
+        has_uv: mesh.has_uv,
+        has_normals: mesh.has_normals,
+        draw_call_vtypes: Vec::new(),
+        local_vertices,
+        faces,
+    })
+}
+
+fn encode_mesh_vertices(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Option<(u32, Vec<u8>, usize)> {
+    let sx = bbox[0] / 32768.0;
+    let sy = bbox[1] / 32768.0;
+    let sz = bbox[2] / 32768.0;
+
+    let verts_i16: Vec<EncodedVertex> = mesh
+        .local_vertices
+        .iter()
+        .map(|lv| {
+            let px = if sx > 0.0 {
+                clamp_i16((lv[0] / sx).round() as i32)
+            } else {
+                0
+            };
+            let py = if sy > 0.0 {
+                clamp_i16((lv[1] / sy).round() as i32)
+            } else {
+                0
+            };
+            let pz = if sz > 0.0 {
+                clamp_i16((lv[2] / sz).round() as i32)
+            } else {
+                0
+            };
+            let tu = clamp_i16((lv[3] * 32768.0).round() as i32);
+            let tv = clamp_i16((lv[4] * 32768.0).round() as i32);
+            let nnx = clamp_i16((lv[5] * 32767.0).round() as i32);
+            let nny = clamp_i16((lv[6] * 32767.0).round() as i32);
+            let nnz = clamp_i16((lv[7] * 32767.0).round() as i32);
+            (tu, tv, nnx, nny, nnz, px, py, pz)
+        })
+        .collect();
+
+    let mut seq_verts = Vec::new();
+    for f in &mesh.faces {
+        for &idx in &[f[0], f[1], f[2]] {
+            if idx < verts_i16.len() {
+                seq_verts.push(verts_i16[idx]);
+            }
+        }
+    }
+    if seq_verts.is_empty() {
+        return None;
+    }
+
+    let mut vtype: u32 = 0;
+    if mesh.has_uv {
+        vtype |= 2;
+    }
+    if mesh.has_normals {
+        vtype |= 2 << 5;
+    }
+    vtype |= 2 << 7;
+
+    let mut vert_buf = Vec::new();
+    for vtx in &seq_verts {
+        if mesh.has_uv {
+            vert_buf.extend_from_slice(&vtx.0.to_le_bytes());
+            vert_buf.extend_from_slice(&vtx.1.to_le_bytes());
+        }
+        if mesh.has_normals {
+            vert_buf.extend_from_slice(&vtx.2.to_le_bytes());
+            vert_buf.extend_from_slice(&vtx.3.to_le_bytes());
+            vert_buf.extend_from_slice(&vtx.4.to_le_bytes());
+        }
+        vert_buf.extend_from_slice(&vtx.5.to_le_bytes());
+        vert_buf.extend_from_slice(&vtx.6.to_le_bytes());
+        vert_buf.extend_from_slice(&vtx.7.to_le_bytes());
+    }
+    while vert_buf.len() % 4 != 0 {
+        vert_buf.push(0);
+    }
+
+    Some((vtype, vert_buf, seq_verts.len()))
+}
+
+fn append_mesh_draw_to_template_section(
+    template_section: &[u8],
+    origin_rel: usize,
+    mesh: &BoneMeshMeta,
+    bbox: &[f32; 3],
+) -> Option<Vec<u8>> {
+    let (vtype, vert_buf, vertex_count) = encode_mesh_vertices(mesh, bbox)?;
+    if vertex_count > u16::MAX as usize || origin_rel + 4 > template_section.len() {
+        return None;
+    }
+
+    let mut ret_rel = None;
+    let mut off = origin_rel;
+    while off + 4 <= template_section.len() {
+        let word = ru32(template_section, off);
+        let cmd = ((word >> 24) & 0xFF) as u8;
+        if cmd == GE_CMD_RET || cmd == GE_CMD_END || cmd == GE_CMD_FINISH {
+            ret_rel = Some(off);
+            break;
+        }
+        off += 4;
+    }
+    let ret_rel = ret_rel?;
+
+    let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
+        let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
+        buf.extend_from_slice(&word.to_le_bytes());
+    };
+
+    let mut inserted_cmds = Vec::new();
+    push_cmd(&mut inserted_cmds, GE_CMD_VADDR, 0);
+    push_cmd(&mut inserted_cmds, GE_CMD_VERTEXTYPE, vtype);
+    push_cmd(
+        &mut inserted_cmds,
+        GE_CMD_PRIM,
+        (PRIM_TRIANGLES as u32) << 16 | vertex_count as u32,
+    );
+    let inserted_len = inserted_cmds.len();
+
+    let mut out = template_section.to_vec();
+    let mut addr_off = origin_rel;
+    while addr_off < ret_rel {
+        let word = ru32(&out, addr_off);
+        let cmd = ((word >> 24) & 0xFF) as u8;
+        if cmd == GE_CMD_VADDR || cmd == GE_CMD_IADDR {
+            let param = (word & 0xFFFFFF).checked_add(inserted_len as u32)?;
+            if param > 0xFFFFFF {
+                return None;
+            }
+            let patched = ((cmd as u32) << 24) | param;
+            out[addr_off..addr_off + 4].copy_from_slice(&patched.to_le_bytes());
+        }
+        addr_off += 4;
+    }
+
+    out.splice(ret_rel..ret_rel, inserted_cmds);
+    let extra_vaddr = out.len().checked_sub(origin_rel)?;
+    if extra_vaddr > 0xFFFFFF {
+        return None;
+    }
+    let patched_vaddr = ((GE_CMD_VADDR as u32) << 24) | extra_vaddr as u32;
+    out[ret_rel..ret_rel + 4].copy_from_slice(&patched_vaddr.to_le_bytes());
+    out.extend_from_slice(&vert_buf);
+    Some(out)
+}
+
 pub fn rebuild_pmf2(meta: &Pmf2Meta) -> Vec<u8> {
     rebuild_pmf2_with_bbox(
         meta,
@@ -1101,9 +1280,9 @@ pub fn patch_pmf2_with_mesh_updates(
     }
 
     let (template_meshes, _, _, _) = extract_per_bone_meshes(template_pmf2, false);
-    let mut template_face_count: HashMap<String, usize> = HashMap::new();
+    let mut template_mesh_by_name: HashMap<String, &BoneMeshData> = HashMap::new();
     for bm in &template_meshes {
-        template_face_count.insert(bm.bone_name.to_ascii_lowercase(), bm.faces.len());
+        template_mesh_by_name.insert(bm.bone_name.to_ascii_lowercase(), bm);
     }
 
     let mut source_sec_by_name: HashMap<String, &BoneSection> = HashMap::new();
@@ -1115,9 +1294,14 @@ pub fn patch_pmf2_with_mesh_updates(
         source_mesh_by_name.insert(bm.bone_name.to_ascii_lowercase(), bm);
     }
 
+    // Keep the original bbox so that unchanged sections' GE data is decoded
+    // correctly by the game.  New/modified meshes are encoded with this bbox;
+    // their positions are clamped to the i16 range at worst, but the rest of
+    // the model stays pixel-perfect.
+    let bbox = template_bbox;
+
     let threshold = matrix_delta_threshold.max(0.0);
     let num_sec = template_sections.len();
-    let bbox = &template_bbox;
 
     let mut section_data_list: Vec<Vec<u8>> = Vec::with_capacity(num_sec);
 
@@ -1129,6 +1313,7 @@ pub fn patch_pmf2_with_mesh_updates(
         let key = tsec.name.to_ascii_lowercase();
         let src_sec = source_sec_by_name.get(&key);
         let src_mesh = source_mesh_by_name.get(&key);
+        let tmpl_mesh = template_mesh_by_name.get(&key);
 
         let mut header = template_pmf2[sec_start..header_end].to_vec();
         while header.len() < 0x100 {
@@ -1152,15 +1337,53 @@ pub fn patch_pmf2_with_mesh_updates(
             }
         }
 
-        let orig_faces = template_face_count.get(&key).copied().unwrap_or(0);
+        let orig_faces = tmpl_mesh.map(|m| m.faces.len()).unwrap_or(0);
         let dae_face_count = src_mesh.map(|m| m.faces.len()).unwrap_or(0);
-        let dae_vert_count = src_mesh.map(|m| m.local_vertices.len()).unwrap_or(0);
         let template_had_mesh = tsec.has_mesh && orig_faces > 0;
 
-        let mut sec_buf = header;
+        let mut sec_buf = header.clone();
         if let Some(mesh) = src_mesh.filter(|_| dae_face_count > 0) {
-            if dae_face_count != orig_faces {
-                let ge_data = build_ge_commands(mesh, bbox);
+            if template_had_mesh && dae_face_count > orig_faces {
+                let extra_mesh = build_mesh_suffix(mesh, orig_faces);
+                let appended = extra_mesh.as_ref().and_then(|extra| {
+                    tsec.origin_offset.and_then(|origin| {
+                        let origin_rel = origin.checked_sub(sec_start)?;
+                        append_mesh_draw_to_template_section(
+                            &template_pmf2[sec_start..sec_end],
+                            origin_rel,
+                            extra,
+                            &bbox,
+                        )
+                    })
+                });
+                if let Some(mut section) = appended {
+                    section[..0x100].copy_from_slice(&header[..0x100]);
+                    sec_buf = section;
+                    eprintln!(
+                        "  [patch-mesh] appended GE for {}: +{} faces, preserved template mesh (was {} faces)",
+                        tsec.name,
+                        dae_face_count - orig_faces,
+                        orig_faces
+                    );
+                } else if dae_face_count != orig_faces {
+                    let ge_data = build_ge_commands(mesh, &bbox);
+                    if !ge_data.is_empty() {
+                        sec_buf.extend_from_slice(&ge_data);
+                        eprintln!(
+                            "  [patch-mesh] rebuilt GE for {}: {} verts, {} faces (was {} faces)",
+                            tsec.name,
+                            mesh.local_vertices.len(),
+                            dae_face_count,
+                            orig_faces
+                        );
+                    } else if sec_end > header_end {
+                        sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
+                    }
+                } else if sec_end > header_end {
+                    sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
+                }
+            } else if dae_face_count != orig_faces {
+                let ge_data = build_ge_commands(mesh, &bbox);
                 if !ge_data.is_empty() {
                     if !template_had_mesh {
                         sec_buf[0x70..0x74].copy_from_slice(&0u32.to_le_bytes());
@@ -1168,7 +1391,10 @@ pub fn patch_pmf2_with_mesh_updates(
                     sec_buf.extend_from_slice(&ge_data);
                     eprintln!(
                         "  [patch-mesh] rebuilt GE for {}: {} verts, {} faces (was {} faces)",
-                        tsec.name, dae_vert_count, dae_face_count, orig_faces
+                        tsec.name,
+                        mesh.local_vertices.len(),
+                        dae_face_count,
+                        orig_faces
                     );
                 } else if sec_end > header_end {
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
@@ -1209,9 +1435,9 @@ pub fn patch_pmf2_with_mesh_updates(
     pmf2[0..4].copy_from_slice(b"PMF2");
     pmf2[4..8].copy_from_slice(&(num_sec as u32).to_le_bytes());
     pmf2[8..12].copy_from_slice(&template_pmf2[8..12]);
-    pmf2[0x10..0x14].copy_from_slice(&template_bbox[0].to_le_bytes());
-    pmf2[0x14..0x18].copy_from_slice(&template_bbox[1].to_le_bytes());
-    pmf2[0x18..0x1C].copy_from_slice(&template_bbox[2].to_le_bytes());
+    pmf2[0x10..0x14].copy_from_slice(&bbox[0].to_le_bytes());
+    pmf2[0x14..0x18].copy_from_slice(&bbox[1].to_le_bytes());
+    pmf2[0x18..0x1C].copy_from_slice(&bbox[2].to_le_bytes());
 
     for (i, &off) in offsets.iter().enumerate() {
         let pos = 0x20 + i * 4;
@@ -1281,6 +1507,108 @@ mod tests {
             0.0, 0.0, 1.0, 0.0, //
             0.0, 0.0, 0.0, 1.0,
         ]
+    }
+
+    fn test_mesh(name: &str, face_count: usize) -> BoneMeshMeta {
+        let mut local_vertices = Vec::new();
+        let mut faces = Vec::new();
+        for i in 0..face_count {
+            let base = local_vertices.len();
+            let x = i as f32 * 2.0;
+            local_vertices.push([x, 0.0, 0.0, 0.1, 0.2, 0.0, 1.0, 0.0]);
+            local_vertices.push([x + 1.0, 0.0, 0.0, 0.3, 0.2, 0.0, 1.0, 0.0]);
+            local_vertices.push([x, 1.0, 0.0, 0.1, 0.4, 0.0, 1.0, 0.0]);
+            faces.push([base, base + 1, base + 2]);
+        }
+        BoneMeshMeta {
+            bone_index: 0,
+            bone_name: name.to_string(),
+            vertex_count: local_vertices.len(),
+            face_count,
+            has_uv: true,
+            has_normals: true,
+            draw_call_vtypes: Vec::new(),
+            local_vertices,
+            faces,
+        }
+    }
+
+    fn template_with_custom_mesh_command() -> Vec<u8> {
+        let mesh = test_mesh("root", 1);
+        let (_, vert_buf, vertex_count) = encode_mesh_vertices(&mesh, &[2.0, 2.0, 2.0]).unwrap();
+        let mut section = vec![0u8; 0x100];
+        for (i, value) in identity().iter().enumerate() {
+            section[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        section[0x60..0x64].copy_from_slice(b"root");
+        section[0x70..0x74].copy_from_slice(&0u32.to_le_bytes());
+        section[0x7C..0x80].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+
+        let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
+            let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
+            buf.extend_from_slice(&word.to_le_bytes());
+        };
+        let vaddr = 7 * 4;
+        push_cmd(&mut section, GE_CMD_ORIGIN, 0);
+        push_cmd(&mut section, GE_CMD_BASE, 0);
+        push_cmd(&mut section, GE_CMD_VADDR, vaddr);
+        push_cmd(&mut section, GE_CMD_VERTEXTYPE, (2 << 7) | (2 << 5) | 2);
+        push_cmd(&mut section, 0x9B, 1);
+        push_cmd(
+            &mut section,
+            GE_CMD_PRIM,
+            (PRIM_TRIANGLES as u32) << 16 | vertex_count as u32,
+        );
+        push_cmd(&mut section, GE_CMD_RET, 0);
+        section.extend_from_slice(&vert_buf);
+        while !section.len().is_multiple_of(16) {
+            section.push(0);
+        }
+
+        let header_size = 0x30usize;
+        let mut pmf2 = vec![0u8; header_size + section.len()];
+        pmf2[0..4].copy_from_slice(b"PMF2");
+        pmf2[4..8].copy_from_slice(&1u32.to_le_bytes());
+        pmf2[8..12].copy_from_slice(&0x20u32.to_le_bytes());
+        for (off, value) in [1.0f32, 1.0, 1.0].iter().enumerate() {
+            pmf2[0x10 + off * 4..0x14 + off * 4].copy_from_slice(&value.to_le_bytes());
+        }
+        pmf2[0x20..0x24].copy_from_slice(&(header_size as u32).to_le_bytes());
+        pmf2[header_size..].copy_from_slice(&section);
+        pmf2
+    }
+
+    #[test]
+    fn patch_appends_new_faces_without_dropping_existing_display_list_state() {
+        let template_pmf2 = template_with_custom_mesh_command();
+        let source_meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [2.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![test_mesh("root", 2)],
+        };
+
+        let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
+        let sec_off = ru32(&patched, 0x20) as usize;
+        let section_end = patched.len();
+        let section = &patched[sec_off..section_end];
+        assert!(section
+            .chunks_exact(4)
+            .any(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]) == 0x9B000001));
+
+        let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
+        assert_eq!(meshes[0].faces.len(), 2);
     }
 
     #[test]
