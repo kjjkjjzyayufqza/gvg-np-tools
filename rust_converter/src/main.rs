@@ -338,7 +338,7 @@ fn cmd_dae_to_pmf2(
                 .any(|(required, current)| required > &(current + 1e-6));
             if needs_larger_bbox {
                 eprintln!(
-                    "Template bbox too small for imported mesh, keeping template PMF2 layout and template bbox"
+                    "Template bbox too small for imported mesh, expanding bbox while preserving template mesh data"
                 );
             }
             pmf2::patch_pmf2_with_mesh_updates(&template, &meta, matrix_delta_threshold)

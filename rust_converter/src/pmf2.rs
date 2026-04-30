@@ -246,6 +246,88 @@ fn decode_vertex(data: &[u8], offset: usize, vt: &VtypeInfo) -> Option<ParsedVer
     Some(pv)
 }
 
+fn vertex_position_field_offset(offset: usize, vt: &VtypeInfo) -> Option<(usize, usize)> {
+    let cs = |f: u8| -> usize { [0, 1, 2, 4][f as usize & 3] };
+    let align = |v: usize, a: usize| -> usize {
+        if a <= 1 {
+            v
+        } else {
+            (v + a - 1) & !(a - 1)
+        }
+    };
+    let mut o = offset;
+
+    if vt.wt_fmt > 0 {
+        let w = cs(vt.wt_fmt);
+        o = align(o, w) + w * vt.wt_count as usize;
+    }
+    if vt.tc_fmt > 0 {
+        let tc_sz = cs(vt.tc_fmt);
+        o = align(o, tc_sz) + tc_sz * 2;
+    }
+    if vt.col_fmt > 0 {
+        let cb = match vt.col_fmt {
+            4 => 2,
+            5 => 2,
+            6 => 2,
+            7 => 4,
+            _ => 0,
+        };
+        if cb > 0 {
+            o = align(o, cb) + cb;
+        }
+    }
+    if vt.nrm_fmt > 0 {
+        let ns = cs(vt.nrm_fmt);
+        o = align(o, ns) + ns * 3;
+    }
+    if vt.pos_fmt == 0 {
+        return None;
+    }
+    let ps = cs(vt.pos_fmt);
+    Some((align(o, ps), ps))
+}
+
+fn rewrite_vertex_position_for_bbox(
+    data: &mut [u8],
+    vertex_offset: usize,
+    vt: &VtypeInfo,
+    old_bbox: &[f32; 3],
+    new_bbox: &[f32; 3],
+) -> Option<()> {
+    let (pos_off, pos_size) = vertex_position_field_offset(vertex_offset, vt)?;
+    if pos_off + pos_size * 3 > data.len() {
+        return None;
+    }
+    for axis in 0..3 {
+        let old_scale = old_bbox[axis] / 32768.0;
+        let new_scale = new_bbox[axis] / 32768.0;
+        if new_scale <= 0.0 {
+            return None;
+        }
+        let off = pos_off + axis * pos_size;
+        match vt.pos_fmt {
+            1 => {
+                let value = ri8(data, off) as f32 / 127.0 * old_scale;
+                let raw = (value / new_scale * 127.0).round().clamp(-128.0, 127.0) as i8;
+                data[off] = raw as u8;
+            }
+            2 => {
+                let value = ri16(data, off) as f32 * old_scale;
+                let raw = clamp_i16((value / new_scale).round() as i32);
+                data[off..off + 2].copy_from_slice(&raw.to_le_bytes());
+            }
+            3 => {
+                let value = rf32(data, off) * old_scale;
+                let raw = value / new_scale;
+                data[off..off + 4].copy_from_slice(&raw.to_le_bytes());
+            }
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
 #[derive(Clone, Debug)]
 struct GeCmd {
     offset: usize,
@@ -1106,6 +1188,60 @@ fn append_mesh_draw_to_template_section(
     Some(out)
 }
 
+fn retarget_template_section_bbox(
+    template_section: &[u8],
+    origin_rel: usize,
+    old_bbox: &[f32; 3],
+    new_bbox: &[f32; 3],
+) -> Option<Vec<u8>> {
+    if origin_rel + 4 > template_section.len() {
+        return None;
+    }
+
+    let scan_end = (origin_rel + 0x800).min(template_section.len());
+    let cmds = scan_ge_display_list(template_section, origin_rel, scan_end);
+    let calls = extract_draw_calls(&cmds, origin_rel);
+    if calls.is_empty() {
+        return None;
+    }
+
+    let mut out = template_section.to_vec();
+    let mut rewritten: HashMap<usize, ()> = HashMap::new();
+    for dc in &calls {
+        let vt = &dc.vtype;
+        let vs = vt.vertex_size();
+        if vs == 0 || vt.pos_fmt == 0 {
+            continue;
+        }
+        if vt.idx_fmt > 0 && dc.iaddr > 0 {
+            let idx_size = [0, 1, 2, 4][vt.idx_fmt as usize & 3];
+            for ii in 0..dc.vertex_count {
+                let ioff = dc.iaddr + ii * idx_size;
+                if ioff + idx_size > out.len() {
+                    return None;
+                }
+                let idx = match idx_size {
+                    1 => ru8(&out, ioff) as usize,
+                    2 => ru16(&out, ioff) as usize,
+                    _ => ru32(&out, ioff) as usize,
+                };
+                let voff = dc.vaddr.checked_add(idx.checked_mul(vs)?)?;
+                if rewritten.insert(voff, ()).is_none() {
+                    rewrite_vertex_position_for_bbox(&mut out, voff, vt, old_bbox, new_bbox)?;
+                }
+            }
+        } else {
+            for vi in 0..dc.vertex_count {
+                let voff = dc.vaddr.checked_add(vi.checked_mul(vs)?)?;
+                if rewritten.insert(voff, ()).is_none() {
+                    rewrite_vertex_position_for_bbox(&mut out, voff, vt, old_bbox, new_bbox)?;
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 pub fn rebuild_pmf2(meta: &Pmf2Meta) -> Vec<u8> {
     rebuild_pmf2_with_bbox(
         meta,
@@ -1294,11 +1430,14 @@ pub fn patch_pmf2_with_mesh_updates(
         source_mesh_by_name.insert(bm.bone_name.to_ascii_lowercase(), bm);
     }
 
-    // Keep the original bbox so that unchanged sections' GE data is decoded
-    // correctly by the game.  New/modified meshes are encoded with this bbox;
-    // their positions are clamped to the i16 range at worst, but the rest of
-    // the model stays pixel-perfect.
-    let bbox = template_bbox;
+    let mut bbox = compute_auto_bbox_from_bone_meshes(&meta.bone_meshes).unwrap_or(template_bbox);
+    for axis in 0..3 {
+        bbox[axis] = bbox[axis].max(template_bbox[axis]);
+    }
+    let bbox_changed = bbox
+        .iter()
+        .zip(template_bbox.iter())
+        .any(|(new, old)| (new - old).abs() > f32::EPSILON);
 
     let threshold = matrix_delta_threshold.max(0.0);
     let num_sec = template_sections.len();
@@ -1340,6 +1479,15 @@ pub fn patch_pmf2_with_mesh_updates(
         let orig_faces = tmpl_mesh.map(|m| m.faces.len()).unwrap_or(0);
         let dae_face_count = src_mesh.map(|m| m.faces.len()).unwrap_or(0);
         let template_had_mesh = tsec.has_mesh && orig_faces > 0;
+        let template_section = &template_pmf2[sec_start..sec_end];
+        let preserved_section = if bbox_changed {
+            tsec.origin_offset.and_then(|origin| {
+                let origin_rel = origin.checked_sub(sec_start)?;
+                retarget_template_section_bbox(template_section, origin_rel, &template_bbox, &bbox)
+            })
+        } else {
+            None
+        };
 
         let mut sec_buf = header.clone();
         if let Some(mesh) = src_mesh.filter(|_| dae_face_count > 0) {
@@ -1348,8 +1496,10 @@ pub fn patch_pmf2_with_mesh_updates(
                 let appended = extra_mesh.as_ref().and_then(|extra| {
                     tsec.origin_offset.and_then(|origin| {
                         let origin_rel = origin.checked_sub(sec_start)?;
+                        let append_source =
+                            preserved_section.as_deref().unwrap_or(template_section);
                         append_mesh_draw_to_template_section(
-                            &template_pmf2[sec_start..sec_end],
+                            append_source,
                             origin_rel,
                             extra,
                             &bbox,
@@ -1379,6 +1529,9 @@ pub fn patch_pmf2_with_mesh_updates(
                     } else if sec_end > header_end {
                         sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                     }
+                } else if let Some(mut section) = preserved_section {
+                    section[..0x100].copy_from_slice(&header[..0x100]);
+                    sec_buf = section;
                 } else if sec_end > header_end {
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                 }
@@ -1399,6 +1552,9 @@ pub fn patch_pmf2_with_mesh_updates(
                 } else if sec_end > header_end {
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                 }
+            } else if let Some(mut section) = preserved_section {
+                section[..0x100].copy_from_slice(&header[..0x100]);
+                sec_buf = section;
             } else if sec_end > header_end {
                 sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
             }
@@ -1409,6 +1565,9 @@ pub fn patch_pmf2_with_mesh_updates(
                 "  [patch-mesh] REMOVED mesh for {}: was {} faces, set +0x70=1 (no-mesh flag)",
                 tsec.name, orig_faces
             );
+        } else if let Some(mut section) = preserved_section {
+            section[..0x100].copy_from_slice(&header[..0x100]);
+            sec_buf = section;
         } else if sec_end > header_end {
             sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
         }
@@ -1570,7 +1729,7 @@ mod tests {
         pmf2[0..4].copy_from_slice(b"PMF2");
         pmf2[4..8].copy_from_slice(&1u32.to_le_bytes());
         pmf2[8..12].copy_from_slice(&0x20u32.to_le_bytes());
-        for (off, value) in [1.0f32, 1.0, 1.0].iter().enumerate() {
+        for (off, value) in [2.0f32, 2.0, 2.0].iter().enumerate() {
             pmf2[0x10 + off * 4..0x14 + off * 4].copy_from_slice(&value.to_le_bytes());
         }
         pmf2[0x20..0x24].copy_from_slice(&(header_size as u32).to_le_bytes());
@@ -1609,6 +1768,40 @@ mod tests {
 
         let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
         assert_eq!(meshes[0].faces.len(), 2);
+    }
+
+    #[test]
+    fn patch_expands_bbox_for_appended_mesh_without_scaling_template_vertices() {
+        let template_pmf2 = template_with_custom_mesh_command();
+        let mut source_mesh = test_mesh("root", 2);
+        source_mesh.local_vertices[3][0] = 6.0;
+        source_mesh.local_vertices[4][0] = 7.0;
+        source_mesh.local_vertices[5][0] = 6.0;
+        let source_meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [8.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![source_mesh],
+        };
+
+        let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
+        let (_, bbox) = parse_pmf2_sections(&patched);
+        assert!(bbox[0] > 7.0);
+
+        let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
+        assert!((meshes[0].local_vertices[1].x - 1.0).abs() < 0.01);
+        assert!(meshes[0].local_vertices.iter().any(|v| v.x > 6.9));
     }
 
     #[test]
