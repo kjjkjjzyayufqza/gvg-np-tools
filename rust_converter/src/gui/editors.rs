@@ -2,11 +2,21 @@ use crate::{
     pmf2, pzz,
     save::{rebuild_pzz_payload, PzzSavePlan, PzzSavePlanner},
     texture::GimImage,
-    workspace::ModWorkspace,
+    workspace::{EntryValidation, ModWorkspace},
 };
 use anyhow::Result;
 use eframe::egui;
 use std::path::PathBuf;
+
+const ROM_TABLE_BASE: u32 = 0x8A56160;
+const PSP_VA_OFFSET: u32 = 0x08800000;
+const CWCHEAT_WRITE32_PREFIX: u32 = 0x20000000;
+
+#[derive(Default)]
+pub struct CwCheatEditorState {
+    pub path: Option<PathBuf>,
+    pub text: String,
+}
 
 #[derive(Default)]
 pub struct EditorWindows {
@@ -15,8 +25,10 @@ pub struct EditorWindows {
     pub gim_preview: Option<usize>,
     pub hex_view: Option<usize>,
     pub save_planner: bool,
+    pub cwcheat_editor: bool,
     pmf2_metadata_state: Option<Pmf2MetadataEditorState>,
     cached_save_plan: Option<Result<PzzSavePlan, String>>,
+    cwcheat_state: CwCheatEditorState,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +107,7 @@ pub fn show_editor_windows(
     last_dir_patch_afs_entry: &mut Option<PathBuf>,
     last_dir_export_stream_png: &mut Option<PathBuf>,
     last_dir_replace_stream_png: &mut Option<PathBuf>,
+    last_dir_cwcheat: &mut Option<PathBuf>,
 ) -> EditorAction {
     let mut action = EditorAction::none();
 
@@ -190,6 +203,27 @@ pub fn show_editor_windows(
         if !open {
             editors.save_planner = false;
             editors.cached_save_plan = None;
+        }
+    }
+
+    if editors.cwcheat_editor {
+        let mut open = true;
+        egui::Window::new("CWCheat Editor")
+            .open(&mut open)
+            .default_size([640.0, 480.0])
+            .resizable(true)
+            .show(ctx, |ui| {
+                if let Some(result) = show_cwcheat_editor(
+                    ui,
+                    workspace,
+                    &mut editors.cwcheat_state,
+                    last_dir_cwcheat,
+                ) {
+                    action.accumulate_from(result);
+                }
+            });
+        if !open {
+            editors.cwcheat_editor = false;
         }
     }
 
@@ -669,3 +703,301 @@ fn patch_afs_dialog(workspace: &ModWorkspace, last_dir: &mut Option<PathBuf>) ->
         Err(e) => EditorAction::error(format!("AFS patch failed: {e}")),
     }
 }
+
+fn show_cwcheat_editor(
+    ui: &mut egui::Ui,
+    workspace: &ModWorkspace,
+    state: &mut CwCheatEditorState,
+    last_dir: &mut Option<PathBuf>,
+) -> Option<EditorAction> {
+    let mut result = None;
+
+    ui.horizontal(|ui| {
+        if ui.button("Open File...").clicked() {
+            let mut dialog = rfd::FileDialog::new().add_filter("INI", &["ini"]);
+            if let Some(dir) = last_dir.clone() {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(path) = dialog.pick_file() {
+                super::remember_parent_dir(last_dir, &path);
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        state.text = content;
+                        state.path = Some(path);
+                        result = Some(EditorAction::status_touch_dirs(
+                            "Loaded CWCheat file".to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        result = Some(EditorAction::error(format!(
+                            "Failed to read file: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        let can_save = state.path.is_some();
+        if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
+            if let Some(path) = &state.path {
+                match std::fs::write(path, &state.text) {
+                    Ok(()) => {
+                        result = Some(EditorAction::status(format!(
+                            "Saved CWCheat: {}",
+                            path.display()
+                        )));
+                    }
+                    Err(e) => {
+                        result = Some(EditorAction::error(format!(
+                            "Failed to save file: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        if ui.button("Save As...").clicked() {
+            let mut dialog = rfd::FileDialog::new().add_filter("INI", &["ini"]);
+            if let Some(dir) = last_dir.clone() {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(existing) = &state.path {
+                if let Some(name) = existing.file_name().and_then(|n| n.to_str()) {
+                    dialog = dialog.set_file_name(name);
+                }
+            } else {
+                dialog = dialog.set_file_name("NPJH50107.ini");
+            }
+            if let Some(path) = dialog.save_file() {
+                super::remember_parent_dir(last_dir, &path);
+                match std::fs::write(&path, &state.text) {
+                    Ok(()) => {
+                        state.path = Some(path.clone());
+                        result = Some(EditorAction::status_touch_dirs(format!(
+                            "Saved CWCheat: {}",
+                            path.display()
+                        )));
+                    }
+                    Err(e) => {
+                        result = Some(EditorAction::error(format!(
+                            "Failed to save file: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+    });
+
+    if let Some(path) = &state.path {
+        ui.label(
+            egui::RichText::new(path.display().to_string())
+                .weak()
+                .monospace(),
+        );
+    }
+    ui.separator();
+
+    let has_afs = workspace.afs_path().is_some();
+    let afs_valid_count = workspace
+        .afs_entries()
+        .iter()
+        .filter(|e| e.validation == EntryValidation::Ok && e.size >= 16)
+        .count();
+    let dirty_count = workspace.dirty_pzz_entry_count();
+    let btn_label = if dirty_count > 0 {
+        format!(
+            "Auto Update All Body Sizes ({} entries, {} modified)",
+            afs_valid_count, dirty_count
+        )
+    } else {
+        format!("Auto Update All Body Sizes ({} entries)", afs_valid_count)
+    };
+    if ui
+        .add_enabled(has_afs, egui::Button::new(btn_label))
+        .on_hover_text(
+            "Scan ALL entries in the loaded AFS (Z_DATA) and regenerate\n\
+             CWCheat body_size overrides for the entire EBOOT ROM table.\n\
+             Modified PZZ entries use rebuilt sizes; others use AFS header sizes.\n\
+             Also includes the verify-pass patch.",
+        )
+        .clicked()
+    {
+        match update_cwcheat_body_sizes(&state.text, workspace) {
+            Ok((updated, entry_count)) => {
+                state.text = updated;
+                result = Some(EditorAction::status(format!(
+                    "Updated CWCheat: {} body_size entries ({} dirty rebuilt)",
+                    entry_count, dirty_count
+                )));
+            }
+            Err(e) => {
+                result = Some(EditorAction::error(format!(
+                    "Auto update failed: {e}"
+                )));
+            }
+        }
+    }
+    ui.separator();
+
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut state.text)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(20)
+                    .font(egui::TextStyle::Monospace),
+            );
+        });
+
+    result
+}
+
+/// Returns `(updated_text, entry_count)`.
+fn update_cwcheat_body_sizes(
+    current_text: &str,
+    workspace: &ModWorkspace,
+) -> std::result::Result<(String, usize), String> {
+    let mut header_lines: Vec<String> = Vec::new();
+    let mut other_groups: Vec<Vec<String>> = Vec::new();
+    let mut current_group: Vec<String> = Vec::new();
+    let mut current_is_pzz_modding = false;
+
+    for line in current_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("_S ") || trimmed.starts_with("_G ") {
+            if !current_group.is_empty() {
+                if !current_is_pzz_modding {
+                    other_groups.push(std::mem::take(&mut current_group));
+                } else {
+                    current_group.clear();
+                }
+            }
+            header_lines.push(line.to_string());
+            current_is_pzz_modding = false;
+            continue;
+        }
+        if trimmed.starts_with("_C") {
+            if !current_group.is_empty() {
+                if !current_is_pzz_modding {
+                    other_groups.push(std::mem::take(&mut current_group));
+                } else {
+                    current_group.clear();
+                }
+            }
+            current_is_pzz_modding = trimmed.contains("PZZ Modding");
+            current_group.push(line.to_string());
+        } else if trimmed.starts_with("_L ") {
+            current_group.push(line.to_string());
+        } else if !trimmed.is_empty() {
+            if current_group.is_empty() {
+                header_lines.push(line.to_string());
+            } else {
+                current_group.push(line.to_string());
+            }
+        }
+    }
+    if !current_group.is_empty() && !current_is_pzz_modding {
+        other_groups.push(current_group);
+    }
+
+    // Rebuild dirty PZZ entries to get their final file sizes.
+    let dirty_entries = workspace.dirty_pzz_entries();
+    let mut dirty_rebuilt_sizes = std::collections::BTreeMap::<usize, usize>::new();
+    for (entry_index, pzz_ws) in &dirty_entries {
+        let rebuilt = rebuild_pzz_payload(pzz_ws)
+            .map_err(|e| format!("Failed to rebuild entry {}: {}", entry_index, e))?;
+        dirty_rebuilt_sizes.insert(*entry_index, rebuilt.len());
+    }
+
+    let mut output = String::new();
+    if header_lines.is_empty() {
+        output.push_str("_S NPJH50107\n");
+        output.push_str("_G Gundam vs Gundam NEXT PLUS\n");
+    } else {
+        for line in &header_lines {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output.push_str("_C1 PZZ Modding - Force verify pass (keep decryption)\n");
+    output.push_str("_L 0x200BD550 0x24020001\n");
+    output.push_str("_L 0x200BD554 0x00000000\n");
+
+    // Generate body_size overrides for ALL entries in the AFS — the entire
+    // EBOOT ROM table (dword_8A56160[2651]).  Every Z_DATA entry has a
+    // hardcoded body_size that controls XOR key derivation, read size, and
+    // tail extraction.  Dirty PZZ entries use rebuilt size; all others use
+    // the AFS header size.
+    struct BodySizeEntry {
+        name: String,
+        cwcheat_addr: u32,
+        body_size: usize,
+        dirty: bool,
+    }
+    let mut entries: Vec<BodySizeEntry> = Vec::new();
+    for entry in workspace.afs_entries() {
+        if entry.validation != EntryValidation::Ok {
+            continue;
+        }
+        let file_size = dirty_rebuilt_sizes
+            .get(&entry.index)
+            .copied()
+            .unwrap_or(entry.size);
+        if file_size < 16 {
+            continue;
+        }
+        let rom_addr = ROM_TABLE_BASE.wrapping_add((entry.index as u32) * 4);
+        let base_name = entry
+            .name
+            .trim_end_matches(".pzz")
+            .trim_end_matches(".bin");
+        entries.push(BodySizeEntry {
+            name: base_name.to_string(),
+            cwcheat_addr: CWCHEAT_WRITE32_PREFIX | (rom_addr - PSP_VA_OFFSET),
+            body_size: file_size - 16,
+            dirty: dirty_rebuilt_sizes.contains_key(&entry.index),
+        });
+    }
+    let total_entry_count = entries.len();
+
+    // Dirty (modified) entries get individual _C1 labels so they stand out.
+    for e in entries.iter().filter(|e| e.dirty) {
+        output.push_str(&format!(
+            "_C1 PZZ Modding - {} body_size ({}) [modified]\n",
+            e.name, e.body_size
+        ));
+        output.push_str(&format!(
+            "_L 0x{:08X} 0x{:08X}\n",
+            e.cwcheat_addr, e.body_size
+        ));
+    }
+
+    // All remaining entries go into a single batch group covering the full
+    // ROM table so that previously-modified entries (from earlier sessions)
+    // are also patched correctly.
+    let batch: Vec<&BodySizeEntry> = entries.iter().filter(|e| !e.dirty).collect();
+    if !batch.is_empty() {
+        output.push_str(&format!(
+            "_C1 PZZ Modding - Z_DATA body_size overrides ({} entries)\n",
+            batch.len()
+        ));
+        for e in &batch {
+            output.push_str(&format!(
+                "_L 0x{:08X} 0x{:08X}\n",
+                e.cwcheat_addr, e.body_size
+            ));
+        }
+    }
+
+    for group in &other_groups {
+        for line in group {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    Ok((output, total_entry_count))
+}
+

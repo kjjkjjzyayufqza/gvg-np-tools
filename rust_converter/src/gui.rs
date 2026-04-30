@@ -60,8 +60,8 @@ pub struct GvgModdingApp {
     last_dir_open_pzz: Option<std::path::PathBuf>,
     last_dir_save_pzz_as: Option<std::path::PathBuf>,
     last_dir_patch_afs_entry: Option<std::path::PathBuf>,
-    last_dir_save_afs_as: Option<std::path::PathBuf>,
     last_dir_write_modified_pzz_to_afs: Option<std::path::PathBuf>,
+    last_dir_cwcheat: Option<std::path::PathBuf>,
     last_dir_export_entry_raw: Option<std::path::PathBuf>,
     last_dir_export_stream_raw: Option<std::path::PathBuf>,
     last_dir_export_stream_dae: Option<std::path::PathBuf>,
@@ -130,8 +130,8 @@ impl GvgModdingApp {
             last_dir_open_pzz: persisted.last_dir_open_pzz,
             last_dir_save_pzz_as: persisted.last_dir_save_pzz_as,
             last_dir_patch_afs_entry: persisted.last_dir_patch_afs_entry,
-            last_dir_save_afs_as: persisted.last_dir_save_afs_as,
             last_dir_write_modified_pzz_to_afs: persisted.last_dir_write_modified_pzz_to_afs,
+            last_dir_cwcheat: persisted.last_dir_cwcheat,
             last_dir_export_entry_raw: persisted.last_dir_export_entry_raw,
             last_dir_export_stream_raw: persisted.last_dir_export_stream_raw,
             last_dir_export_stream_dae: persisted.last_dir_export_stream_dae,
@@ -196,6 +196,7 @@ impl eframe::App for GvgModdingApp {
             &mut self.last_dir_patch_afs_entry,
             &mut self.last_dir_export_stream_png,
             &mut self.last_dir_replace_stream_png,
+            &mut self.last_dir_cwcheat,
         );
         self.gui_state_dirty |= editor_result.dirs_changed;
         if editor_result.preview_changed {
@@ -257,8 +258,8 @@ impl GvgModdingApp {
             last_dir_open_pzz: self.last_dir_open_pzz.clone(),
             last_dir_save_pzz_as: self.last_dir_save_pzz_as.clone(),
             last_dir_patch_afs_entry: self.last_dir_patch_afs_entry.clone(),
-            last_dir_save_afs_as: self.last_dir_save_afs_as.clone(),
             last_dir_write_modified_pzz_to_afs: self.last_dir_write_modified_pzz_to_afs.clone(),
+            last_dir_cwcheat: self.last_dir_cwcheat.clone(),
             last_dir_export_entry_raw: self.last_dir_export_entry_raw.clone(),
             last_dir_export_stream_raw: self.last_dir_export_stream_raw.clone(),
             last_dir_export_stream_dae: self.last_dir_export_stream_dae.clone(),
@@ -333,31 +334,12 @@ impl GvgModdingApp {
                     }
                 });
                 ui.separator();
-                if ui.button("Save PZZ As...").clicked() {
-                    self.editors.save_planner = true;
-                    ui.close();
-                }
-                if ui.button("Patch AFS Entry...").clicked() {
-                    self.editors.save_planner = true;
-                    ui.close();
-                }
                 let has_afs = self.workspace.afs_path().is_some();
                 if ui
                     .add_enabled(has_afs, egui::Button::new("Save AFS As..."))
                     .clicked()
                 {
                     self.save_afs_as_dialog();
-                    ui.close();
-                }
-                let has_dirty_pzz_entries = has_afs && self.workspace.dirty_pzz_entry_count() > 0;
-                if ui
-                    .add_enabled(
-                        has_dirty_pzz_entries,
-                        egui::Button::new("Write All Modified PZZ Entries to AFS..."),
-                    )
-                    .clicked()
-                {
-                    self.save_dirty_pzz_entries_as_dialog();
                     ui.close();
                 }
                 ui.separator();
@@ -368,6 +350,12 @@ impl GvgModdingApp {
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.show_left_panel, "Show Left Panel");
                 ui.checkbox(&mut self.show_right_panel, "Show Right Panel");
+            });
+            ui.menu_button("Tools", |ui| {
+                if ui.button("CWCheat Editor...").clicked() {
+                    self.editors.cwcheat_editor = true;
+                    ui.close();
+                }
             });
         });
     }
@@ -414,59 +402,12 @@ impl GvgModdingApp {
             self.notify_error("No AFS file is open.".to_owned());
             return;
         };
+        let dirty_count = self.workspace.dirty_pzz_entry_count();
+
         let default_name = afs_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("output.bin")
-            .to_string();
-        let mut save_dialog = rfd::FileDialog::new()
-            .add_filter("AFS/BIN", &["bin", "afs"])
-            .set_file_name(&default_name);
-        if let Some(dir) = &self.last_dir_save_afs_as {
-            save_dialog = save_dialog.set_directory(dir);
-        }
-        let Some(output_path) = save_dialog.save_file() else {
-            return;
-        };
-        match copy_afs_with_retry(&afs_path, &output_path) {
-            Ok(bytes) => {
-                touch_dialog_dir_parent(
-                    &mut self.last_dir_save_afs_as,
-                    &output_path,
-                    &mut self.gui_state_dirty,
-                );
-                if paths_point_to_same_file(&afs_path, &output_path) {
-                    self.status = "Save target is the same file as the open AFS (nothing to copy)."
-                        .to_owned();
-                    return;
-                }
-                self.status = format!(
-                    "Saved AFS ({:.1} MB) -> {}",
-                    bytes as f64 / (1024.0 * 1024.0),
-                    output_path.display()
-                );
-            }
-            Err(e) => {
-                self.notify_error(format!("Failed to save AFS: {e}"));
-            }
-        }
-    }
-
-    fn save_dirty_pzz_entries_as_dialog(&mut self) {
-        let Some(afs_path) = self.workspace.afs_path().cloned() else {
-            self.notify_error("No AFS file is open.".to_owned());
-            return;
-        };
-        let dirty_count = self.workspace.dirty_pzz_entry_count();
-        if dirty_count == 0 {
-            self.notify_error("No modified PZZ entries are staged.".to_owned());
-            return;
-        }
-
-        let default_name = afs_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Z_DATA_patched.BIN")
             .to_string();
         let mut save_dialog = rfd::FileDialog::new()
             .add_filter("AFS/BIN", &["bin", "afs"])
@@ -477,9 +418,34 @@ impl GvgModdingApp {
         let Some(output_path) = save_dialog.save_file() else {
             return;
         };
+
+        if dirty_count == 0 {
+            match copy_afs_with_retry(&afs_path, &output_path) {
+                Ok(bytes) => {
+                    touch_dialog_dir_parent(
+                        &mut self.last_dir_write_modified_pzz_to_afs,
+                        &output_path,
+                        &mut self.gui_state_dirty,
+                    );
+                    if paths_point_to_same_file(&afs_path, &output_path) {
+                        self.status =
+                            "Save target is the same file as the open AFS.".to_owned();
+                        return;
+                    }
+                    self.status = format!(
+                        "Saved AFS ({:.1} MB) -> {}",
+                        bytes as f64 / (1024.0 * 1024.0),
+                        output_path.display()
+                    );
+                }
+                Err(e) => self.notify_error(format!("Failed to save AFS: {e}")),
+            }
+            return;
+        }
+
         if paths_point_to_same_file(&afs_path, &output_path) {
             self.notify_error(
-                "Choose a different output path for batch PZZ write-back.".to_owned(),
+                "Choose a different output path when modified PZZ entries exist.".to_owned(),
             );
             return;
         }
@@ -497,20 +463,20 @@ impl GvgModdingApp {
                     &mut self.gui_state_dirty,
                 );
                 self.workspace.push_log(format!(
-                    "Wrote {} modified PZZ entries ({:.1} MB) -> {}",
+                    "Saved AFS with {} modified PZZ entries ({:.1} MB) -> {}",
                     dirty_count,
                     byte_count as f64 / (1024.0 * 1024.0),
                     output_path.display()
                 ));
                 self.status = format!(
-                    "Wrote {} modified PZZ entries ({:.1} MB) -> {}",
+                    "Saved AFS with {} modified PZZ entries ({:.1} MB) -> {}",
                     dirty_count,
                     byte_count as f64 / (1024.0 * 1024.0),
                     output_path.display()
                 );
             }
             Err(e) => {
-                self.notify_error(format!("Failed to write modified PZZ entries: {e}"));
+                self.notify_error(format!("Failed to save AFS: {e}"));
             }
         }
     }

@@ -397,7 +397,14 @@ pub fn rebuild_stream_archive_with_original_key(
             info.chunk_count.saturating_sub(info.stream_count)
         );
     }
-    Ok(build_pzz_with_tail(streams, info.key, info.has_tail))
+    let dec = build_decrypted_stream_archive(streams);
+    let new_body_size = dec.len();
+    let new_key = derive_xor_key_from_size(new_body_size);
+    let mut encrypted = xor_decrypt(&dec, new_key);
+    if info.has_tail {
+        encrypted.extend_from_slice(&compute_pzz_tail(&dec));
+    }
+    Ok(encrypted)
 }
 
 pub fn rebuild_pzz_from_original(original_pzz: &[u8], streams: &[Vec<u8>]) -> Option<Vec<u8>> {
@@ -468,7 +475,17 @@ pub fn rebuild_pzz_from_original(original_pzz: &[u8], streams: &[Vec<u8>]) -> Op
         dec[cursor..cursor + c.len()].copy_from_slice(c);
         cursor += c.len();
     }
-    let encrypted_body = xor_decrypt(&dec, layout.key);
+    let new_key = derive_xor_key_from_size(body_size);
+    if new_key != layout.key {
+        eprintln!(
+            "[pzz] rebuild: body_size changed {} -> {}, XOR key 0x{:08X} -> 0x{:08X}",
+            layout.chunks.iter().map(Vec::len).sum::<usize>() + data_start,
+            body_size,
+            layout.key,
+            new_key
+        );
+    }
+    let encrypted_body = xor_decrypt(&dec, new_key);
     if has_tail {
         let new_tail = compute_pzz_tail(&dec);
         let mut result = encrypted_body;
@@ -479,7 +496,6 @@ pub fn rebuild_pzz_from_original(original_pzz: &[u8], streams: &[Vec<u8>]) -> Op
     }
 }
 
-#[cfg(test)]
 const SBOX1: [u8; 256] = [
     0x1e, 0x65, 0xc2, 0x22, 0x20, 0xc5, 0x6c, 0xf1, 0xb7, 0x07, 0x73, 0x2a, 0x31, 0x43, 0x48, 0x3d,
     0x75, 0x30, 0x1b, 0x78, 0x09, 0x2d, 0xc7, 0xad, 0x0a, 0xf6, 0x3c, 0xac, 0x5a, 0x7e, 0xdd, 0x0d,
@@ -499,7 +515,6 @@ const SBOX1: [u8; 256] = [
     0x2e, 0x57, 0xb9, 0x47, 0x61, 0x4e, 0x2c, 0x42, 0xde, 0x96, 0x6b, 0x41, 0x94, 0x88, 0x70, 0xd2,
 ];
 
-#[cfg(test)]
 const SBOX2: [u8; 256] = [
     0x74, 0x97, 0x27, 0x1e, 0x65, 0xfe, 0xf5, 0x09, 0x71, 0x78, 0x1d, 0x54, 0x7b, 0xd3, 0x16, 0x98,
     0x87, 0x4c, 0xe9, 0x33, 0xb9, 0x82, 0x8f, 0x6c, 0x3e, 0x5d, 0x24, 0x55, 0x23, 0x7e, 0xee, 0xd9,
@@ -519,7 +534,6 @@ const SBOX2: [u8; 256] = [
     0xf8, 0x86, 0x37, 0x58, 0xc9, 0x77, 0xfc, 0x8d, 0x2e, 0xf0, 0x0a, 0xd6, 0xe4, 0x70, 0x7f, 0x6f,
 ];
 
-#[cfg(test)]
 fn sbox_lookup(idx: u8, step: u8, table: &[u8; 256]) -> u32 {
     let mut i = idx;
     let b0 = table[i as usize];
@@ -532,8 +546,7 @@ fn sbox_lookup(idx: u8, step: u8, table: &[u8; 256]) -> u32 {
     (b0 as u32) << 24 | (b1 as u32) << 16 | (b2 as u32) << 8 | b3 as u32
 }
 
-#[cfg(test)]
-fn derive_xor_key_from_size(body_size: usize) -> u32 {
+pub fn derive_xor_key_from_size(body_size: usize) -> u32 {
     let sz = body_size as u32;
     let mut nibble = 0u8;
     let mut shift = 3u32;
