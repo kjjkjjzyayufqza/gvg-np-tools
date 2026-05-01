@@ -59,6 +59,9 @@ const PRIM_TRIANGLES: u8 = 3;
 const PRIM_TRIANGLE_STRIP: u8 = 4;
 const PRIM_TRIANGLE_FAN: u8 = 5;
 
+const SECTION_MESH_FLAG_OFFSET: usize = 0x70;
+const SECTION_MATERIAL_INDEX_OFFSET: usize = 0x74;
+
 #[derive(Clone, Debug, Default)]
 pub struct VtypeInfo {
     pub raw: u32,
@@ -1500,7 +1503,8 @@ fn rebuild_pmf2_with_bbox(meta: &Pmf2Meta, bbox: [f32; 3]) -> Vec<u8> {
             .map(|mesh| !mesh.local_vertices.is_empty())
             .unwrap_or(false);
         let has_mesh_flag = if has_mesh_data { 0u32 } else { 1u32 };
-        sec_buf[0x70..0x74].copy_from_slice(&has_mesh_flag.to_le_bytes());
+        sec_buf[SECTION_MESH_FLAG_OFFSET..SECTION_MESH_FLAG_OFFSET + 4]
+            .copy_from_slice(&has_mesh_flag.to_le_bytes());
 
         if let Some(mesh) = mesh_for_section {
             if has_mesh_data {
@@ -1715,7 +1719,14 @@ pub fn patch_pmf2_with_mesh_updates(
                     let ge_data = build_ge_commands(mesh_for_ge, &bbox);
                     if !ge_data.is_empty() {
                         if !template_had_mesh {
-                            sec_buf[0x70..0x74].copy_from_slice(&0u32.to_le_bytes());
+                            sec_buf[SECTION_MESH_FLAG_OFFSET..SECTION_MESH_FLAG_OFFSET + 4]
+                                .copy_from_slice(&0u32.to_le_bytes());
+                            // IDA: section+0x74 indexes the 36-byte material table.
+                            // No-mesh sections can contain stale values here; material 0
+                            // is the safest default until callers expose a donor material.
+                            sec_buf
+                                [SECTION_MATERIAL_INDEX_OFFSET..SECTION_MATERIAL_INDEX_OFFSET + 4]
+                                .copy_from_slice(&0u32.to_le_bytes());
                         }
                         sec_buf.extend_from_slice(&ge_data);
                         eprintln!(
@@ -1741,7 +1752,8 @@ pub fn patch_pmf2_with_mesh_updates(
                 sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
             }
         } else if template_had_mesh && (src_mesh.is_none() || dae_face_count == 0) {
-            sec_buf[0x70..0x74].copy_from_slice(&1u32.to_le_bytes());
+            sec_buf[SECTION_MESH_FLAG_OFFSET..SECTION_MESH_FLAG_OFFSET + 4]
+                .copy_from_slice(&1u32.to_le_bytes());
             sec_buf.truncate(0x100);
             eprintln!(
                 "  [patch-mesh] REMOVED mesh for {}: was {} faces, set +0x70=1 (no-mesh flag)",
@@ -1882,7 +1894,8 @@ mod tests {
             section[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         section[0x60..0x64].copy_from_slice(b"root");
-        section[0x70..0x74].copy_from_slice(&0u32.to_le_bytes());
+        section[SECTION_MESH_FLAG_OFFSET..SECTION_MESH_FLAG_OFFSET + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
         section[0x7C..0x80].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
 
         let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
@@ -1983,6 +1996,62 @@ mod tests {
         let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
         let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
         assert_eq!(meshes[0].faces.len(), 2);
+    }
+
+    #[test]
+    fn patch_mesh_clears_stale_no_mesh_header_word_when_enabling_section() {
+        let template_meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [2.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: false,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: Vec::new(),
+        };
+        let mut template_pmf2 = rebuild_pmf2(&template_meta);
+        let sec_off = ru32(&template_pmf2, 0x20) as usize;
+        template_pmf2[sec_off + SECTION_MESH_FLAG_OFFSET..sec_off + SECTION_MESH_FLAG_OFFSET + 4]
+            .copy_from_slice(&1u32.to_le_bytes());
+        template_pmf2
+            [sec_off + SECTION_MATERIAL_INDEX_OFFSET..sec_off + SECTION_MATERIAL_INDEX_OFFSET + 4]
+            .copy_from_slice(&0x7F4u32.to_le_bytes());
+        let source_meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [2.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![test_mesh("root", 1)],
+        };
+
+        let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
+        let patched_sec_off = ru32(&patched, 0x20) as usize;
+        assert_eq!(
+            ru32(&patched, patched_sec_off + SECTION_MESH_FLAG_OFFSET),
+            0
+        );
+        assert_eq!(
+            ru32(&patched, patched_sec_off + SECTION_MATERIAL_INDEX_OFFSET),
+            0
+        );
     }
 
     #[test]
@@ -2380,8 +2449,8 @@ mod tests {
         let pmf2 = rebuild_pmf2(&meta);
         let sec0_off = ru32(&pmf2, 0x20) as usize;
         let sec1_off = ru32(&pmf2, 0x24) as usize;
-        let sec0_flag = ru32(&pmf2, sec0_off + 0x70);
-        let sec1_flag = ru32(&pmf2, sec1_off + 0x70);
+        let sec0_flag = ru32(&pmf2, sec0_off + SECTION_MESH_FLAG_OFFSET);
+        let sec1_flag = ru32(&pmf2, sec1_off + SECTION_MESH_FLAG_OFFSET);
         assert_eq!(sec0_flag, 0);
         assert_eq!(sec1_flag, 1);
     }
