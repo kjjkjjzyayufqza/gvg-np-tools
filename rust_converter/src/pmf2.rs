@@ -1104,7 +1104,7 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
         let vaddr = cmd_block_size + start * vertex_size;
         push_cmd(&mut ge, 0x01, vaddr as u32);
         push_cmd(&mut ge, 0x12, vtype);
-        push_cmd(&mut ge, 0x9B, 1);
+        push_cmd(&mut ge, 0x9B, 0);
         push_cmd(&mut ge, 0x04, (PRIM_TRIANGLES as u32) << 16 | *count as u32);
     }
     push_cmd(&mut ge, 0x0B, 0);
@@ -2530,7 +2530,7 @@ mod tests {
     }
 
     #[test]
-    fn build_ge_commands_emits_bbox_command_before_prim() {
+    fn build_ge_commands_uses_native_bbox_zero_before_prim() {
         let mesh = test_mesh("root", 1);
         let ge_data = build_ge_commands(&mesh, &[2.0, 2.0, 2.0]);
         let words = ge_data
@@ -2542,7 +2542,7 @@ mod tests {
             .position(|word| ((*word >> 24) & 0xFF) as u8 == GE_CMD_PRIM)
             .unwrap();
 
-        assert_eq!(words[prim_pos - 1], 0x9B000001);
+        assert_eq!(words[prim_pos - 1], 0x9B000000);
     }
 
     #[test]
