@@ -126,7 +126,10 @@ Purpose: special-section regression for `pl0a_o05` and PZZ size risk.
 - [ ] Confirm the input DAE targets `pl0a_o05` or another non-standard ornament/effect section.
 - [ ] Preview may show the appended mesh; do not treat preview visibility as proof that the game will render it.
 - [ ] Check the target section against `PMF2_SPECIAL_SECTIONS_ANALYSIS.md`.
-- [ ] For `pl0a_o05`, expected risk: `word_8A17F10[24] == 0x0000`, so it is not drawn/traversed by the same main render path as `m01`, `m07`, or `m11`.
+- [ ] For `pl0a_o05`, expected risk: `word_8A17F10[24] == 0x0000`, so it is not drawn/traversed by the same confirmed main render path as `m01`, `m07`, or `m11`.
+- [ ] Record the appended draw shape: native `o05` uses indexed `TRIANGLE_STRIP` draws, while the converter may append unindexed `TRIANGLES`.
+- [ ] Record the appended `TRIANGLES` PRIM vertex count. Remember that `PRIM` low 16 bits are vertex count, not triangle count.
+- [ ] If a large single appended `TRIANGLES` draw hangs the game, test a chunked-PRIM output before concluding the section is unusable.
 - [ ] Confirm the generated PMF2 keeps section offsets valid and reaches `RET`/`END` in display-list scans.
 - [ ] When repacking to PZZ, record whether stream 0 compressed size exceeds the original chunk.
 - [ ] If the game infinitely loads or hangs, test the same added mesh remapped to a known drawable section before debugging PMF2 display-list bytes further.

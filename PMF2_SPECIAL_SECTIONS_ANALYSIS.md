@@ -2,9 +2,9 @@
 
 ## Summary
 
-Not every PMF2 section that contains valid mesh/display-list bytes is actually drawn by the game. The game has a hard-coded per-section runtime mask at `word_8A17F10` that controls whether a section is traversed and whether it enqueues draw commands.
+Not every PMF2 section that contains valid mesh/display-list bytes behaves like a normal body mesh target in game. The game has a hard-coded per-section runtime mask at `word_8A17F10` that controls whether a section is traversed and whether it enqueues draw commands in one confirmed render path.
 
-This means the converter preview can show a mesh that the game will not draw, because the preview parses PMF2 data directly while the game applies additional section-index policy.
+This means the converter preview can show a mesh that the game may not draw or may load differently, because the preview parses PMF2 data directly while the game applies additional section-index policy and native GE/display-list expectations.
 
 ## Runtime Draw Mask
 
@@ -22,7 +22,7 @@ sub_8870BC0(model, section_index, parent_matrix)
 Observed flag meanings:
 
 ```text
-0x0000 = neither traverse nor draw in this render path
+0x0000 = neither traverse nor draw in this confirmed render path
 0x0002 = traverse only
 0x0003 = traverse and draw
 ```
@@ -62,12 +62,23 @@ original pl0a.pzz stream000 / pl0a_o05:
   mesh flag = 0
   parent = 2
 
-test.pmf2 / pl0a_o05:
+failing test.pmf2 / pl0a_o05:
   section index = 24
   size = 22160
   mesh flag = 0
   parent = 2
   appended +294 faces
+```
+
+A later user test combined the added meshes into one mesh and produced a game-loadable output:
+
+```text
+non-hanging test.pmf2 / pl0a_o05:
+  section index = 24
+  size = 17024
+  mesh flag = 0
+  parent = 2
+  appended draw count = 561 vertices = 187 triangles
 ```
 
 PMF2 parsing did not show obvious structural damage:
@@ -77,13 +88,55 @@ PMF2 parsing did not show obvious structural damage:
 - `VADDR`/`VTYPE`/`PRIM` are present.
 - Preview can render the mesh.
 
-However, IDA shows `word_8A17F10[24] == 0x0000`, so this section is not drawn/traversed by the same main render traversal used by normal body sections.
+However, IDA shows `word_8A17F10[24] == 0x0000`, so this section is not drawn/traversed by the same confirmed main render traversal used by normal body sections. The later non-hanging result means `o05` should not be classified as absolutely unusable; it is a conditional/special target whose game behavior depends on the exact generated display-list/data shape.
+
+Important algorithm hypothesis:
+
+```text
+native o05:
+  VTYPE = 0x1142
+  uses IADDR + VADDR
+  many small indexed TRIANGLE_STRIP PRIM commands
+
+converter appended mesh:
+  VTYPE = 0x0142
+  unindexed TRIANGLES
+  one large PRIM command
+```
+
+PSP GE `PRIM` low 16 bits are vertex count, not triangle count:
+
+```text
+failing appended draw:
+  PRIM param = 0x030372
+  type = 3 TRIANGLES
+  count = 0x372 = 882 vertices = 294 triangles
+
+non-hanging appended draw:
+  PRIM param = 0x030231
+  type = 3 TRIANGLES
+  count = 0x231 = 561 vertices = 187 triangles
+```
+
+This suggests the issue may be the converter's append strategy for native indexed/strip sections, not the section itself. A single large unindexed `TRIANGLES` draw may be too coarse for some native contexts.
 
 Practical conclusion:
 
-- Do not treat `pl0a_o05` as a normal import target.
+- Treat `pl0a_o05` as conditional/special, not as a normal safe body mesh target.
 - Preview success on `o05` does not prove game renderability.
-- Imported meshes targeting `o05` should be remapped to a known drawable section unless later IDA analysis identifies a separate game render path for `o05`.
+- If targeting `o05`, test small/chunked appended PRIM output before assuming the section cannot work.
+- Imported meshes targeting `o05` should still offer remapping to a known drawable section unless the user explicitly wants to experiment with this special target.
+
+## Planned Algorithm Experiment
+
+Before making a final policy decision for `o05`, test a converter change:
+
+1. Do not emit one large appended `TRIANGLES` `PRIM` for additional mesh data.
+2. Split appended unindexed `TRIANGLES` into smaller `PRIM` batches, for example 60 or 96 vertices per draw.
+3. Keep native display-list state preservation unchanged.
+4. Generate `testout.dae -> test.pmf2` and test in game.
+
+If the chunked-PRIM version avoids infinite loading, then the root cause is the append draw generation strategy for special/native indexed sections, not `o05` being categorically unusable.
 
 ## PZZ Size Risk
 
@@ -107,7 +160,7 @@ This may be safe only if the save path correctly rebuilds the PZZ descriptor lay
 
 ## Recommended Converter Policy
 
-- Warn for imports targeting `m00` and other non-drawable special sections.
+- Warn for imports targeting `m00` and conditional/special sections.
 - Add a drawable-section validation step using a table derived from `word_8A17F10`.
 - Offer remap choices for non-drawable targets:
 
@@ -116,7 +169,7 @@ m00 -> m01
 o05 -> m01 / m07 / m11 / user-selected drawable section
 ```
 
-- Keep preview behavior as-is, but label preview-only sections so users do not assume game renderability.
+- Keep preview behavior as-is, but label preview-only or conditional sections so users do not assume game renderability.
 
 ## Known Drawable Positive Controls
 

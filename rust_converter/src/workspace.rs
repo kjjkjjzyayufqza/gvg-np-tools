@@ -436,6 +436,10 @@ impl PzzWorkspace {
         self.stream_nodes.iter().any(|s| s.dirty)
     }
 
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn cached_rebuild_payload(&self) -> Option<&[u8]> {
         self.cached_rebuild
             .as_ref()

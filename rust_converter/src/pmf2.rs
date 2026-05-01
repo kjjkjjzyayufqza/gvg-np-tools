@@ -969,16 +969,38 @@ fn clamp_i16(val: i32) -> i16 {
     val.clamp(-32768, 32767) as i16
 }
 
+fn wrap_texture_coord(value: f32) -> f32 {
+    if value < 0.0 || value > 1.0 {
+        value.rem_euclid(1.0)
+    } else {
+        value
+    }
+}
+
 type EncodedVertex = (i16, i16, i16, i16, i16, i16, i16, i16);
 const MAX_TRIANGLE_PRIM_VERTICES: usize = 0xFFFC;
+const APPENDED_TRIANGLE_PRIM_VERTICES: usize = 96;
 
 fn triangle_prim_chunks(vertex_count: usize) -> Vec<(usize, usize)> {
+    triangle_prim_chunks_with_limit(vertex_count, MAX_TRIANGLE_PRIM_VERTICES)
+}
+
+fn triangle_prim_chunks_with_limit(
+    vertex_count: usize,
+    max_vertices: usize,
+) -> Vec<(usize, usize)> {
     let mut chunks = Vec::new();
+    let max_vertices = max_vertices.min(MAX_TRIANGLE_PRIM_VERTICES);
+    let max_vertices = max_vertices - max_vertices % 3;
+    if max_vertices == 0 {
+        return chunks;
+    }
+
     let mut start = 0usize;
     while start < vertex_count {
         let remaining = vertex_count - start;
-        let mut count = remaining.min(MAX_TRIANGLE_PRIM_VERTICES);
-        if remaining > MAX_TRIANGLE_PRIM_VERTICES {
+        let mut count = remaining.min(max_vertices);
+        if remaining > max_vertices {
             count -= count % 3;
         }
         if count == 0 {
@@ -1014,8 +1036,8 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
             } else {
                 0
             };
-            let tu = clamp_i16((lv[3] * 32768.0).round() as i32);
-            let tv = clamp_i16((lv[4] * 32768.0).round() as i32);
+            let tu = clamp_i16((wrap_texture_coord(lv[3]) * 32768.0).round() as i32);
+            let tv = clamp_i16((wrap_texture_coord(lv[4]) * 32768.0).round() as i32);
             let nnx = clamp_i16((lv[5] * 32767.0).round() as i32);
             let nny = clamp_i16((lv[6] * 32767.0).round() as i32);
             let nnz = clamp_i16((lv[7] * 32767.0).round() as i32);
@@ -1262,8 +1284,8 @@ fn encode_mesh_vertices(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Option<(u32, Ve
             } else {
                 0
             };
-            let tu = clamp_i16((lv[3] * 32768.0).round() as i32);
-            let tv = clamp_i16((lv[4] * 32768.0).round() as i32);
+            let tu = clamp_i16((wrap_texture_coord(lv[3]) * 32768.0).round() as i32);
+            let tv = clamp_i16((wrap_texture_coord(lv[4]) * 32768.0).round() as i32);
             let nnx = clamp_i16((lv[5] * 32767.0).round() as i32);
             let nny = clamp_i16((lv[6] * 32767.0).round() as i32);
             let nnz = clamp_i16((lv[7] * 32767.0).round() as i32);
@@ -1324,7 +1346,7 @@ fn append_mesh_draw_to_template_section(
     if origin_rel + 4 > template_section.len() {
         return None;
     }
-    let chunks = triangle_prim_chunks(vertex_count);
+    let chunks = triangle_prim_chunks_with_limit(vertex_count, APPENDED_TRIANGLE_PRIM_VERTICES);
     if chunks.is_empty() {
         return None;
     }
@@ -1353,10 +1375,14 @@ fn append_mesh_draw_to_template_section(
     };
 
     let mut inserted_cmds = Vec::new();
-    for (_, count) in &chunks {
+    let mut inserted_vaddr_offsets = Vec::with_capacity(chunks.len());
+    for (chunk_idx, (_, count)) in chunks.iter().enumerate() {
+        inserted_vaddr_offsets.push(inserted_cmds.len());
         push_cmd(&mut inserted_cmds, GE_CMD_VADDR, 0);
-        push_cmd(&mut inserted_cmds, GE_CMD_VERTEXTYPE, vtype);
-        push_cmd(&mut inserted_cmds, 0x9B, 1);
+        if chunk_idx == 0 {
+            push_cmd(&mut inserted_cmds, GE_CMD_VERTEXTYPE, vtype);
+            push_cmd(&mut inserted_cmds, 0x9B, 1);
+        }
         push_cmd(
             &mut inserted_cmds,
             GE_CMD_PRIM,
@@ -1390,7 +1416,7 @@ fn append_mesh_draw_to_template_section(
             return None;
         }
         let patched_vaddr = ((GE_CMD_VADDR as u32) << 24) | chunk_vaddr as u32;
-        let vaddr_pos = insert_rel + chunk_idx * 16;
+        let vaddr_pos = insert_rel + inserted_vaddr_offsets[chunk_idx];
         out[vaddr_pos..vaddr_pos + 4].copy_from_slice(&patched_vaddr.to_le_bytes());
     }
     out.extend_from_slice(&vert_buf);
@@ -1967,6 +1993,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn encode_mesh_vertices_wraps_negative_uvs_for_game_texture_repeat() {
+        let mut mesh = test_mesh("root", 1);
+        mesh.local_vertices[0][3] = -0.25;
+
+        let (_, vert_buf, _) = encode_mesh_vertices(&mesh, &[2.0, 2.0, 2.0]).unwrap();
+        let encoded_u = i16::from_le_bytes([vert_buf[0], vert_buf[1]]) as f32 / 32768.0;
+
+        assert!((encoded_u - 0.75).abs() < 1.0 / 32768.0);
+    }
+
     fn template_with_custom_mesh_command() -> Vec<u8> {
         let mesh = test_mesh("root", 1);
         let (_, vert_buf, vertex_count) = encode_mesh_vertices(&mesh, &[2.0, 2.0, 2.0]).unwrap();
@@ -2093,6 +2130,156 @@ mod tests {
 
         assert_eq!(prim_positions.len(), 2);
         assert!(prim_positions[1] < cleanup_pos);
+    }
+
+    #[test]
+    fn append_chunks_generated_triangle_draws_into_small_batches() {
+        let mesh = test_mesh("root", 1);
+        let (_, vert_buf, vertex_count) = encode_mesh_vertices(&mesh, &[2.0, 2.0, 2.0]).unwrap();
+        let mut section = vec![0u8; 0x100];
+        let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
+            let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
+            buf.extend_from_slice(&word.to_le_bytes());
+        };
+
+        let origin_rel = section.len();
+        let vaddr = 8 * 4;
+        push_cmd(&mut section, GE_CMD_ORIGIN, 0);
+        push_cmd(&mut section, GE_CMD_BASE, 0);
+        push_cmd(&mut section, GE_CMD_VADDR, vaddr);
+        push_cmd(&mut section, GE_CMD_VERTEXTYPE, (2 << 7) | (2 << 5) | 2);
+        push_cmd(&mut section, 0x9B, 1);
+        push_cmd(
+            &mut section,
+            GE_CMD_PRIM,
+            (PRIM_TRIANGLES as u32) << 16 | vertex_count as u32,
+        );
+        push_cmd(&mut section, GE_CMD_RET, 0);
+        section.extend_from_slice(&vert_buf);
+
+        let extra = test_mesh("root", 295);
+        let extra = build_mesh_suffix(&extra, 1).unwrap();
+        let patched =
+            append_mesh_draw_to_template_section(&section, origin_rel, &extra, &[2.0, 2.0, 2.0])
+                .unwrap();
+        let prim_counts = patched
+            .chunks_exact(4)
+            .filter_map(|word| {
+                let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+                (((value >> 24) & 0xFF) as u8 == GE_CMD_PRIM).then_some(value & 0xFFFF)
+            })
+            .collect::<Vec<_>>();
+        let appended_counts = &prim_counts[1..];
+
+        assert!(appended_counts.len() > 1);
+        assert!(appended_counts.iter().all(|count| *count <= 96));
+        assert_eq!(appended_counts.iter().sum::<u32>(), 294 * 3);
+    }
+
+    #[test]
+    fn append_chunks_do_not_repeat_vertex_state_for_each_prim_batch() {
+        let mesh = test_mesh("root", 1);
+        let (_, vert_buf, vertex_count) = encode_mesh_vertices(&mesh, &[2.0, 2.0, 2.0]).unwrap();
+        let mut section = vec![0u8; 0x100];
+        let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
+            let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
+            buf.extend_from_slice(&word.to_le_bytes());
+        };
+
+        let origin_rel = section.len();
+        let vaddr = 8 * 4;
+        push_cmd(&mut section, GE_CMD_ORIGIN, 0);
+        push_cmd(&mut section, GE_CMD_BASE, 0);
+        push_cmd(&mut section, GE_CMD_VADDR, vaddr);
+        push_cmd(&mut section, GE_CMD_VERTEXTYPE, (2 << 7) | (2 << 5) | 2);
+        push_cmd(&mut section, 0x9B, 1);
+        push_cmd(
+            &mut section,
+            GE_CMD_PRIM,
+            (PRIM_TRIANGLES as u32) << 16 | vertex_count as u32,
+        );
+        push_cmd(&mut section, GE_CMD_RET, 0);
+        section.extend_from_slice(&vert_buf);
+
+        let extra = test_mesh("root", 295);
+        let extra = build_mesh_suffix(&extra, 1).unwrap();
+        let patched =
+            append_mesh_draw_to_template_section(&section, origin_rel, &extra, &[2.0, 2.0, 2.0])
+                .unwrap();
+        let words = patched
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect::<Vec<_>>();
+        let prim_positions = words
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, word)| (((word >> 24) & 0xFF) as u8 == GE_CMD_PRIM).then_some(idx))
+            .collect::<Vec<_>>();
+        let ret_pos = words
+            .iter()
+            .position(|word| ((*word >> 24) & 0xFF) as u8 == GE_CMD_RET)
+            .unwrap();
+        let inserted_range = prim_positions[0] + 1..ret_pos;
+        let bbox_state_count = words[inserted_range]
+            .iter()
+            .filter(|word| (((**word >> 24) & 0xFF) as u8) == 0x9B)
+            .count();
+
+        assert!(prim_positions.len() > 2);
+        assert_eq!(bbox_state_count, 1);
+    }
+
+    #[test]
+    fn append_chunked_draw_keeps_initial_vaddr_before_vertex_state() {
+        let mesh = test_mesh("root", 1);
+        let (_, vert_buf, vertex_count) = encode_mesh_vertices(&mesh, &[2.0, 2.0, 2.0]).unwrap();
+        let mut section = vec![0u8; 0x100];
+        let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
+            let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
+            buf.extend_from_slice(&word.to_le_bytes());
+        };
+
+        let origin_rel = section.len();
+        let vaddr = 8 * 4;
+        push_cmd(&mut section, GE_CMD_ORIGIN, 0);
+        push_cmd(&mut section, GE_CMD_BASE, 0);
+        push_cmd(&mut section, GE_CMD_VADDR, vaddr);
+        push_cmd(&mut section, GE_CMD_VERTEXTYPE, (2 << 7) | (2 << 5) | 2);
+        push_cmd(&mut section, 0x9B, 1);
+        push_cmd(
+            &mut section,
+            GE_CMD_PRIM,
+            (PRIM_TRIANGLES as u32) << 16 | vertex_count as u32,
+        );
+        push_cmd(&mut section, GE_CMD_RET, 0);
+        section.extend_from_slice(&vert_buf);
+
+        let extra = test_mesh("root", 295);
+        let extra = build_mesh_suffix(&extra, 1).unwrap();
+        let patched =
+            append_mesh_draw_to_template_section(&section, origin_rel, &extra, &[2.0, 2.0, 2.0])
+                .unwrap();
+        let words = patched
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect::<Vec<_>>();
+        let prim_positions = words
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, word)| (((word >> 24) & 0xFF) as u8 == GE_CMD_PRIM).then_some(idx))
+            .collect::<Vec<_>>();
+        let first_inserted = prim_positions[0] + 1;
+
+        assert_eq!(((words[first_inserted] >> 24) & 0xFF) as u8, GE_CMD_VADDR);
+        assert_eq!(
+            ((words[first_inserted + 1] >> 24) & 0xFF) as u8,
+            GE_CMD_VERTEXTYPE
+        );
+        assert_eq!(((words[first_inserted + 2] >> 24) & 0xFF) as u8, 0x9B);
+        assert_eq!(
+            ((words[first_inserted + 3] >> 24) & 0xFF) as u8,
+            GE_CMD_PRIM
+        );
     }
 
     #[test]

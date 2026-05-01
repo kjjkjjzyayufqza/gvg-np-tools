@@ -55,6 +55,7 @@ pub struct GvgModdingApp {
     gpu_mesh: Option<GpuMesh>,
     gpu_texture_bind_group: Option<wgpu::BindGroup>,
     gpu_mesh_stream_index: Option<usize>,
+    gpu_mesh_pzz_revision: Option<u64>,
     wgpu_state: Option<WgpuState>,
     recent_afs_paths: Vec<std::path::PathBuf>,
     last_dir_open_afs: Option<std::path::PathBuf>,
@@ -178,6 +179,7 @@ impl GvgModdingApp {
             gpu_mesh: None,
             gpu_texture_bind_group: None,
             gpu_mesh_stream_index: None,
+            gpu_mesh_pzz_revision: None,
             wgpu_state,
             recent_afs_paths: persisted.recent_afs_paths.clone(),
             last_dir_open_afs: persisted.last_dir_open_afs,
@@ -653,6 +655,7 @@ impl GvgModdingApp {
                 self.gpu_mesh = None;
                 self.gpu_texture_bind_group = None;
                 self.gpu_mesh_stream_index = None;
+                self.gpu_mesh_pzz_revision = None;
                 self.status = format!("Loaded AFS ({} entries)", count);
             }
             Err(e) => {
@@ -765,6 +768,10 @@ impl GvgModdingApp {
                 self.preview_state = PreviewState::default();
                 self.editors = EditorWindows::default();
                 self.reload_cwcheat_editor_text_from_path();
+                self.gpu_mesh = None;
+                self.gpu_texture_bind_group = None;
+                self.gpu_mesh_stream_index = None;
+                self.gpu_mesh_pzz_revision = None;
                 self.status = "Loaded PZZ".to_string();
             }
             Err(e) => {
@@ -818,6 +825,7 @@ impl GvgModdingApp {
                 self.tree_state.selected_stream = Some(index);
                 self.preview_state.camera = None;
                 self.gpu_mesh_stream_index = None;
+                self.gpu_mesh_pzz_revision = None;
             }
             TreeAction::ExportEntryRaw(index) => {
                 self.export_entry_raw(index);
@@ -999,6 +1007,7 @@ impl GvgModdingApp {
         match self.workspace.replace_stream(stream_index, new_pmf2) {
             Ok(()) => {
                 self.gpu_mesh_stream_index = None;
+                self.gpu_mesh_pzz_revision = None;
                 self.status = "Replaced PMF2 stream from DAE".to_string();
             }
             Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
@@ -1038,6 +1047,7 @@ impl GvgModdingApp {
         match self.workspace.replace_stream(stream_index, new_pmf2) {
             Ok(()) => {
                 self.gpu_mesh_stream_index = None;
+                self.gpu_mesh_pzz_revision = None;
                 self.status = format!("Replaced PMF2 stream from {}", path.display());
             }
             Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
@@ -1122,7 +1132,12 @@ impl GvgModdingApp {
             }
         };
         match self.workspace.replace_stream(stream_index, replaced) {
-            Ok(()) => self.status = "Replaced GIM stream from PNG".to_string(),
+            Ok(()) => {
+                self.gpu_mesh_stream_index = None;
+                self.gpu_mesh_pzz_revision = None;
+                self.gpu_texture_bind_group = None;
+                self.status = "Replaced GIM stream from PNG".to_string();
+            }
             Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
         }
     }
@@ -1217,7 +1232,13 @@ impl GvgModdingApp {
 
     fn update_gpu_mesh(&mut self) {
         let selected = self.tree_state.selected_stream;
-        if self.gpu_mesh_stream_index == selected && selected.is_some() {
+        let current_pzz_revision = self.workspace.open_pzz().map(PzzWorkspace::revision);
+        if gpu_mesh_cache_is_current(
+            self.gpu_mesh_stream_index,
+            self.gpu_mesh_pzz_revision,
+            selected,
+            current_pzz_revision,
+        ) {
             return;
         }
 
@@ -1225,6 +1246,7 @@ impl GvgModdingApp {
             self.gpu_mesh = None;
             self.gpu_texture_bind_group = None;
             self.gpu_mesh_stream_index = None;
+            self.gpu_mesh_pzz_revision = None;
             return;
         };
 
@@ -1234,6 +1256,7 @@ impl GvgModdingApp {
                 self.gpu_mesh = None;
                 self.gpu_texture_bind_group = None;
                 self.gpu_mesh_stream_index = Some(stream_index);
+                self.gpu_mesh_pzz_revision = current_pzz_revision;
                 return;
             }
         };
@@ -1275,7 +1298,19 @@ impl GvgModdingApp {
         }
 
         self.gpu_mesh_stream_index = Some(stream_index);
+        self.gpu_mesh_pzz_revision = current_pzz_revision;
     }
+}
+
+fn gpu_mesh_cache_is_current(
+    cached_stream_index: Option<usize>,
+    cached_pzz_revision: Option<u64>,
+    selected_stream: Option<usize>,
+    current_pzz_revision: Option<u64>,
+) -> bool {
+    cached_stream_index == selected_stream
+        && selected_stream.is_some()
+        && cached_pzz_revision == current_pzz_revision
 }
 
 fn build_patched_afs_with_dirty_pzz_entry_clones(
@@ -1385,4 +1420,19 @@ fn copy_via_temp_rename(src: &Path, dst: &Path) -> std::io::Result<u64> {
         e
     })?;
     Ok(nbytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_mesh_cache_invalidates_when_selected_stream_revision_changes() {
+        assert!(!gpu_mesh_cache_is_current(
+            Some(0),
+            Some(1),
+            Some(0),
+            Some(2)
+        ));
+    }
 }

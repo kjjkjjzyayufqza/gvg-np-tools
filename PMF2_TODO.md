@@ -57,8 +57,9 @@
 
 - [x] Record runtime draw-mask findings for non-standard sections.
   - `word_8A17F10[0] == 0x0002`: `pl0a_m00` traverses children but does not draw.
-  - `word_8A17F10[24] == 0x0000`: `pl0a_o05` is not drawn/traversed by the same main render path.
-  - `testout.dae -> test.pmf2` showed preview can render appended `pl0a_o05` geometry, but game loading/rendering may fail because `o05` is not a normal drawable target.
+  - `word_8A17F10[24] == 0x0000`: `pl0a_o05` is not drawn/traversed by the same confirmed main render path.
+  - `testout.dae -> test.pmf2` showed preview can render appended `pl0a_o05` geometry, but game loading/rendering depends on the generated append shape.
+  - Current hypothesis: native `o05` uses many small indexed `TRIANGLE_STRIP` draws, while the converter appends one large unindexed `TRIANGLES` draw; chunking appended `TRIANGLES` into smaller `PRIM` batches should be tested next.
   - Repacking this case also warned that stream 0 compressed size exceeded the original chunk (`55653 > 50944`), so PZZ/AFS layout should be checked when game loading hangs.
   - Full notes: `PMF2_SPECIAL_SECTIONS_ANALYSIS.md`.
 
