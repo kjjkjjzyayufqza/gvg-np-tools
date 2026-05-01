@@ -19,6 +19,12 @@ pub struct PersistedGuiState {
     pub last_dir_write_modified_pzz_to_afs: Option<PathBuf>,
     #[serde(default)]
     pub last_dir_cwcheat: Option<PathBuf>,
+    /// Remembered CW cheat INI path (full file path).
+    #[serde(default)]
+    pub cwcheat_file_path: Option<PathBuf>,
+    /// When true, run body_size regeneration after each successful Save AFS As.
+    #[serde(default)]
+    pub auto_update_cwcheat_on_save_afs: bool,
     #[serde(default)]
     pub last_dir_export_entry_raw: Option<PathBuf>,
     #[serde(default)]

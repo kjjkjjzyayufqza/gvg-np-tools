@@ -1,5 +1,6 @@
 ---
+description: 
 alwaysApply: true
 ---
 
-请不要使用grepping和search tools，请换成cmd的方式执行
+请不要使用cursor的grepping和search tools，请换成cmd的方式执行

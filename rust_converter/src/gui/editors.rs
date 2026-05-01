@@ -12,9 +12,59 @@ const ROM_TABLE_BASE: u32 = 0x8A56160;
 const PSP_VA_OFFSET: u32 = 0x08800000;
 const CWCHEAT_WRITE32_PREFIX: u32 = 0x20000000;
 
+/// Shown when no CW cheat path is set or the path does not exist on disk.
+pub(crate) const CWCHEAT_UNRESOLVED_PATH_HINT: &str =
+    "No CW cheat file path is set, or the file does not exist. Save AFS is unaffected.";
+
+pub(crate) fn cwcheat_ini_path_resolves(path: &Option<PathBuf>) -> bool {
+    path.as_ref().is_some_and(|p| p.exists())
+}
+
+fn cwcheat_ini_dialog_base_dir(
+    last_dir: &Option<PathBuf>,
+    current_file: &Option<PathBuf>,
+) -> Option<PathBuf> {
+    last_dir
+        .clone()
+        .or_else(|| current_file.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())))
+}
+
+/// Pick an existing `.ini` for CW cheat (Open / settings).
+pub(crate) fn cwcheat_pick_ini_open(
+    last_dir: &Option<PathBuf>,
+    current_file: &Option<PathBuf>,
+) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().add_filter("INI", &["ini"]);
+    if let Some(dir) = cwcheat_ini_dialog_base_dir(last_dir, current_file) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file()
+}
+
+/// Save-as dialog for CW cheat `.ini`.
+pub(crate) fn cwcheat_pick_ini_save_as(
+    last_dir: &Option<PathBuf>,
+    current_file: &Option<PathBuf>,
+) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().add_filter("INI", &["ini"]);
+    if let Some(dir) = cwcheat_ini_dialog_base_dir(last_dir, current_file) {
+        dialog = dialog.set_directory(dir);
+    }
+    match current_file.as_ref() {
+        Some(existing) => {
+            if let Some(name) = existing.file_name().and_then(|n| n.to_str()) {
+                dialog = dialog.set_file_name(name);
+            }
+        }
+        None => {
+            dialog = dialog.set_file_name("NPJH50107.ini");
+        }
+    }
+    dialog.save_file()
+}
+
 #[derive(Default)]
 pub struct CwCheatEditorState {
-    pub path: Option<PathBuf>,
     pub text: String,
 }
 
@@ -29,6 +79,16 @@ pub struct EditorWindows {
     pmf2_metadata_state: Option<Pmf2MetadataEditorState>,
     cached_save_plan: Option<Result<PzzSavePlan, String>>,
     cwcheat_state: CwCheatEditorState,
+}
+
+impl EditorWindows {
+    pub(crate) fn set_cwcheat_editor_text(&mut self, text: String) {
+        self.cwcheat_state.text = text;
+    }
+
+    pub(crate) fn cwcheat_editor_text(&self) -> &str {
+        &self.cwcheat_state.text
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +168,7 @@ pub fn show_editor_windows(
     last_dir_export_stream_png: &mut Option<PathBuf>,
     last_dir_replace_stream_png: &mut Option<PathBuf>,
     last_dir_cwcheat: &mut Option<PathBuf>,
+    cwcheat_file_path: &mut Option<PathBuf>,
 ) -> EditorAction {
     let mut action = EditorAction::none();
 
@@ -213,9 +274,13 @@ pub fn show_editor_windows(
             .default_size([640.0, 480.0])
             .resizable(true)
             .show(ctx, |ui| {
-                if let Some(result) =
-                    show_cwcheat_editor(ui, workspace, &mut editors.cwcheat_state, last_dir_cwcheat)
-                {
+                if let Some(result) = show_cwcheat_editor(
+                    ui,
+                    workspace,
+                    &mut editors.cwcheat_state,
+                    last_dir_cwcheat,
+                    cwcheat_file_path,
+                ) {
                     action.accumulate_from(result);
                 }
             });
@@ -706,21 +771,23 @@ fn show_cwcheat_editor(
     workspace: &mut ModWorkspace,
     state: &mut CwCheatEditorState,
     last_dir: &mut Option<PathBuf>,
+    cwcheat_file_path: &mut Option<PathBuf>,
 ) -> Option<EditorAction> {
     let mut result = None;
 
+    if !cwcheat_ini_path_resolves(cwcheat_file_path) {
+        ui.label(egui::RichText::new(CWCHEAT_UNRESOLVED_PATH_HINT).weak());
+        ui.add_space(4.0);
+    }
+
     ui.horizontal(|ui| {
         if ui.button("Open File...").clicked() {
-            let mut dialog = rfd::FileDialog::new().add_filter("INI", &["ini"]);
-            if let Some(dir) = last_dir.clone() {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(path) = dialog.pick_file() {
+            if let Some(path) = cwcheat_pick_ini_open(last_dir, cwcheat_file_path) {
                 super::remember_parent_dir(last_dir, &path);
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         state.text = content;
-                        state.path = Some(path);
+                        *cwcheat_file_path = Some(path);
                         result = Some(EditorAction::status_touch_dirs(
                             "Loaded CWCheat file".to_string(),
                         ));
@@ -732,12 +799,12 @@ fn show_cwcheat_editor(
             }
         }
 
-        let can_save = state.path.is_some();
+        let can_save = cwcheat_file_path.is_some();
         if ui
             .add_enabled(can_save, egui::Button::new("Save"))
             .clicked()
         {
-            if let Some(path) = &state.path {
+            if let Some(path) = cwcheat_file_path.as_ref() {
                 match std::fs::write(path, &state.text) {
                     Ok(()) => {
                         result = Some(EditorAction::status(format!(
@@ -753,22 +820,11 @@ fn show_cwcheat_editor(
         }
 
         if ui.button("Save As...").clicked() {
-            let mut dialog = rfd::FileDialog::new().add_filter("INI", &["ini"]);
-            if let Some(dir) = last_dir.clone() {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(existing) = &state.path {
-                if let Some(name) = existing.file_name().and_then(|n| n.to_str()) {
-                    dialog = dialog.set_file_name(name);
-                }
-            } else {
-                dialog = dialog.set_file_name("NPJH50107.ini");
-            }
-            if let Some(path) = dialog.save_file() {
+            if let Some(path) = cwcheat_pick_ini_save_as(last_dir, cwcheat_file_path) {
                 super::remember_parent_dir(last_dir, &path);
                 match std::fs::write(&path, &state.text) {
                     Ok(()) => {
-                        state.path = Some(path.clone());
+                        *cwcheat_file_path = Some(path.clone());
                         result = Some(EditorAction::status_touch_dirs(format!(
                             "Saved CWCheat: {}",
                             path.display()
@@ -782,7 +838,7 @@ fn show_cwcheat_editor(
         }
     });
 
-    if let Some(path) = &state.path {
+    if let Some(path) = cwcheat_file_path.as_ref() {
         ui.label(
             egui::RichText::new(path.display().to_string())
                 .weak()
@@ -846,7 +902,7 @@ fn show_cwcheat_editor(
 }
 
 /// Returns `(updated_text, entry_count)`.
-fn update_cwcheat_body_sizes(
+pub(crate) fn update_cwcheat_body_sizes(
     current_text: &str,
     workspace: &mut ModWorkspace,
 ) -> std::result::Result<(String, usize), String> {

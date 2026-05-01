@@ -70,10 +70,19 @@ pub struct GvgModdingApp {
     last_dir_replace_stream_pmf2: Option<std::path::PathBuf>,
     last_dir_export_stream_png: Option<std::path::PathBuf>,
     last_dir_replace_stream_png: Option<std::path::PathBuf>,
+    /// Persisted CW cheat INI path; also drives the CWCheat Editor buffer reload.
+    cwcheat_file_path: Option<std::path::PathBuf>,
+    auto_update_cwcheat_on_save_afs: bool,
+    cwcheat_settings_modal_open: bool,
     gui_state_dirty: bool,
     /// User-dismissable error dialog; same text is mirrored in `status`.
     pending_alert: Option<String>,
     save_afs_job: Option<SaveAfsJob>,
+    /// After the real eframe/winit loop starts, fit **once** to monitor (cannot probe before `run_native`).
+    #[cfg(not(target_arch = "wasm32"))]
+    needs_initial_window_fit: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    initial_window_fit_miss_frames: u32,
 }
 
 struct SaveAfsJob {
@@ -82,11 +91,28 @@ struct SaveAfsJob {
     dirty_count: usize,
 }
 
+/// Default logical inner size (**1920×1080**, Full HD).
+const DEFAULT_WINDOW_INNER_W: f32 = 1920.0;
+const DEFAULT_WINDOW_INNER_H: f32 = 1080.0;
+/// Applied to egui-reported monitor logical size; leaves margin for decorations / taskbar.
+const WINDOW_FIT_OCCUPY_FRAC: f32 = 0.94;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn inner_size_points_for_monitor(mon: egui::Vec2) -> egui::Vec2 {
+    let avail_w = mon.x * WINDOW_FIT_OCCUPY_FRAC;
+    let avail_h = mon.y * WINDOW_FIT_OCCUPY_FRAC;
+    let s = (avail_w / DEFAULT_WINDOW_INNER_W)
+        .min(avail_h / DEFAULT_WINDOW_INNER_H)
+        .min(1.0);
+    egui::vec2(DEFAULT_WINDOW_INNER_W * s, DEFAULT_WINDOW_INNER_H * s)
+}
+
 pub fn run_native() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 820.0])
+            .with_inner_size([DEFAULT_WINDOW_INNER_W, DEFAULT_WINDOW_INNER_H])
             .with_min_inner_size([960.0, 640.0])
+            .with_clamp_size_to_monitor_size(true)
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -98,6 +124,26 @@ pub fn run_native() -> eframe::Result<()> {
 }
 
 impl GvgModdingApp {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn maybe_apply_initial_window_fit(&mut self, ctx: &egui::Context) {
+        if !self.needs_initial_window_fit {
+            return;
+        }
+
+        let monitor_size = ctx.input(|i| i.viewport().monitor_size);
+        let Some(mon) = monitor_size else {
+            self.initial_window_fit_miss_frames = self.initial_window_fit_miss_frames.saturating_add(1);
+            if self.initial_window_fit_miss_frames > 120 {
+                self.needs_initial_window_fit = false;
+            }
+            return;
+        };
+
+        let size = inner_size_points_for_monitor(mon);
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        self.needs_initial_window_fit = false;
+    }
+
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (gpu_renderer, wgpu_state) = if let Some(rs) = cc.wgpu_render_state.as_ref() {
             let renderer = GpuRenderer::new(&rs.device, &rs.queue);
@@ -120,7 +166,7 @@ impl GvgModdingApp {
             eprintln!("[gui] GUI persistence: {}", p.display());
         }
 
-        Self {
+        let mut app = Self {
             workspace: ModWorkspace::default(),
             tree_state: AssetTreeState::default(),
             preview_state: PreviewState::default(),
@@ -147,15 +193,27 @@ impl GvgModdingApp {
             last_dir_replace_stream_pmf2: persisted.last_dir_replace_stream_pmf2,
             last_dir_export_stream_png: persisted.last_dir_export_stream_png,
             last_dir_replace_stream_png: persisted.last_dir_replace_stream_png,
+            cwcheat_file_path: persisted.cwcheat_file_path.clone(),
+            auto_update_cwcheat_on_save_afs: persisted.auto_update_cwcheat_on_save_afs,
+            cwcheat_settings_modal_open: false,
             gui_state_dirty: false,
             pending_alert: None,
             save_afs_job: None,
-        }
+            #[cfg(not(target_arch = "wasm32"))]
+            needs_initial_window_fit: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            initial_window_fit_miss_frames: 0,
+        };
+        app.reload_cwcheat_editor_text_from_path();
+        app
     }
 }
 
 impl eframe::App for GvgModdingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.maybe_apply_initial_window_fit(ctx);
+
         self.poll_save_afs_job(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -208,6 +266,7 @@ impl eframe::App for GvgModdingApp {
             &mut self.last_dir_export_stream_png,
             &mut self.last_dir_replace_stream_png,
             &mut self.last_dir_cwcheat,
+            &mut self.cwcheat_file_path,
         );
         self.gui_state_dirty |= editor_result.dirs_changed;
         if editor_result.preview_changed {
@@ -224,6 +283,7 @@ impl eframe::App for GvgModdingApp {
         }
 
         Self::show_error_modal(ctx, &mut self.pending_alert);
+        self.show_cwcheat_settings_modal(ctx);
 
         self.try_flush_gui_state_disk();
     }
@@ -263,6 +323,145 @@ impl GvgModdingApp {
         self.pending_alert = Some(msg);
     }
 
+    fn reload_cwcheat_editor_text_from_path(&mut self) {
+        let Some(p) = self.cwcheat_file_path.as_ref() else {
+            self.editors.set_cwcheat_editor_text(String::new());
+            return;
+        };
+        if !p.exists() {
+            self.editors.set_cwcheat_editor_text(String::new());
+            return;
+        }
+        match std::fs::read_to_string(p) {
+            Ok(text) => self.editors.set_cwcheat_editor_text(text),
+            Err(e) => {
+                let msg = format!(
+                    "CW cheat reload failed (could not read {}): {e}",
+                    p.display()
+                );
+                eprintln!("[gui] {}", msg);
+                self.workspace.push_log(msg);
+                self.editors.set_cwcheat_editor_text(String::new());
+            }
+        }
+    }
+
+    fn maybe_auto_update_cwcheat_after_afs_save(&mut self) {
+        if !self.auto_update_cwcheat_on_save_afs {
+            return;
+        }
+        let Some(path) = self
+            .cwcheat_file_path
+            .as_ref()
+            .filter(|p| p.exists())
+        else {
+            return;
+        };
+        let Ok(current_text) = std::fs::read_to_string(path) else {
+            self.workspace.push_log(
+                "CW cheat auto-update skipped: could not read the cheat file.".to_string(),
+            );
+            return;
+        };
+        if current_text != self.editors.cwcheat_editor_text() {
+            self.workspace.push_log(
+                "CW cheat auto-update skipped: editor buffer differs from file on disk (save or reload to sync)."
+                    .to_string(),
+            );
+            return;
+        }
+        match editors::update_cwcheat_body_sizes(&current_text, &mut self.workspace) {
+            Ok((updated, entry_count)) => {
+                if let Err(e) = std::fs::write(path, &updated) {
+                    self.workspace.push_log(format!(
+                        "CW cheat auto-update failed writing {}: {e}",
+                        path.display()
+                    ));
+                    return;
+                }
+                self.editors.set_cwcheat_editor_text(updated);
+                self.workspace.push_log(format!(
+                    "CW cheat auto-updated ({} body_size lines) -> {}",
+                    entry_count,
+                    path.display()
+                ));
+            }
+            Err(e) => {
+                self.workspace.push_log(format!("CW cheat auto-update skipped: {e}"));
+            }
+        }
+    }
+
+    fn show_cwcheat_settings_modal(&mut self, ctx: &egui::Context) {
+        if !self.cwcheat_settings_modal_open {
+            return;
+        }
+
+        let modal = egui::Modal::new(egui::Id::new("gvg_cwcheat_settings_modal")).show(ctx, |ui| {
+            ui.set_min_width(440.0);
+            ui.heading("CW Cheat");
+            ui.separator();
+
+            if !editors::cwcheat_ini_path_resolves(&self.cwcheat_file_path) {
+                ui.label(egui::RichText::new(editors::CWCHEAT_UNRESOLVED_PATH_HINT).weak());
+                ui.add_space(8.0);
+            }
+
+            if ui
+                .checkbox(
+                    &mut self.auto_update_cwcheat_on_save_afs,
+                    "After Save AFS As, auto-compute body sizes and update this CW cheat file",
+                )
+                .changed()
+            {
+                self.mark_gui_state_dirty();
+            }
+            ui.label(
+                egui::RichText::new(
+                    "When enabled, each successful Save AFS As reads the cheat file from disk, regenerates PZZ Modding body_size entries from the current workspace, writes back, and refreshes the editor — only if the editor buffer still matches the file (save or reload after manual edits).",
+                )
+                .weak()
+                .small(),
+            );
+
+            ui.add_space(8.0);
+            ui.label("CW cheat file (.ini):");
+            match &self.cwcheat_file_path {
+                Some(p) => {
+                    ui.label(egui::RichText::new(p.display().to_string()).weak().monospace());
+                }
+                None => {
+                    ui.label(egui::RichText::new("(none)").weak());
+                }
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Choose CW cheat (.ini)…").clicked() {
+                    if let Some(path) = editors::cwcheat_pick_ini_open(
+                        &self.last_dir_cwcheat,
+                        &self.cwcheat_file_path,
+                    ) {
+                        touch_dialog_dir_parent(
+                            &mut self.last_dir_cwcheat,
+                            &path,
+                            &mut self.gui_state_dirty,
+                        );
+                        self.cwcheat_file_path = Some(path);
+                        self.reload_cwcheat_editor_text_from_path();
+                    }
+                }
+            });
+
+            ui.separator();
+            ui.button("Close").clicked()
+        });
+
+        let closed = modal.inner || modal.should_close();
+        if closed {
+            self.cwcheat_settings_modal_open = false;
+        }
+    }
+
     fn poll_save_afs_job(&mut self, ctx: &egui::Context) {
         let Some(job) = self.save_afs_job.as_ref() else {
             return;
@@ -277,18 +476,16 @@ impl GvgModdingApp {
                             &job.output_path,
                             &mut self.gui_state_dirty,
                         );
-                        self.workspace.push_log(format!(
+                        let mib = byte_count as f64 / (1024.0 * 1024.0);
+                        let summary = format!(
                             "Saved AFS with {} modified PZZ entries ({:.1} MB) -> {}",
                             job.dirty_count,
-                            byte_count as f64 / (1024.0 * 1024.0),
-                            job.output_path.display()
-                        ));
-                        self.status = format!(
-                            "Saved AFS with {} modified PZZ entries ({:.1} MB) -> {}",
-                            job.dirty_count,
-                            byte_count as f64 / (1024.0 * 1024.0),
+                            mib,
                             job.output_path.display()
                         );
+                        self.workspace.push_log(summary.clone());
+                        self.status = summary;
+                        self.maybe_auto_update_cwcheat_after_afs_save();
                     }
                     Err(e) => self.notify_error(format!("Failed to save AFS: {e}")),
                 }
@@ -318,6 +515,8 @@ impl GvgModdingApp {
             last_dir_replace_stream_pmf2: self.last_dir_replace_stream_pmf2.clone(),
             last_dir_export_stream_png: self.last_dir_export_stream_png.clone(),
             last_dir_replace_stream_png: self.last_dir_replace_stream_png.clone(),
+            cwcheat_file_path: self.cwcheat_file_path.clone(),
+            auto_update_cwcheat_on_save_afs: self.auto_update_cwcheat_on_save_afs,
             recent_afs_paths: self.recent_afs_paths.clone(),
         }
     }
@@ -412,6 +611,15 @@ impl GvgModdingApp {
                     ui.close();
                 }
             });
+
+            ui.add_space(6.0);
+            if ui
+                .button("Settings")
+                .on_hover_text("CW cheat file path and Save AFS auto-update options")
+                .clicked()
+            {
+                self.cwcheat_settings_modal_open = true;
+            }
         });
     }
 
@@ -441,6 +649,7 @@ impl GvgModdingApp {
                 self.tree_state = AssetTreeState::default();
                 self.preview_state = PreviewState::default();
                 self.editors = EditorWindows::default();
+                self.reload_cwcheat_editor_text_from_path();
                 self.gpu_mesh = None;
                 self.gpu_texture_bind_group = None;
                 self.gpu_mesh_stream_index = None;
@@ -491,6 +700,7 @@ impl GvgModdingApp {
                         bytes as f64 / (1024.0 * 1024.0),
                         output_path.display()
                     );
+                    self.maybe_auto_update_cwcheat_after_afs_save();
                 }
                 Err(e) => self.notify_error(format!("Failed to save AFS: {e}")),
             }
@@ -554,6 +764,7 @@ impl GvgModdingApp {
                 self.tree_state = AssetTreeState::default();
                 self.preview_state = PreviewState::default();
                 self.editors = EditorWindows::default();
+                self.reload_cwcheat_editor_text_from_path();
                 self.status = "Loaded PZZ".to_string();
             }
             Err(e) => {
