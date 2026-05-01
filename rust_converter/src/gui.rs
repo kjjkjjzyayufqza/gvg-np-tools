@@ -11,8 +11,8 @@ use crate::{
     gpu_renderer::{GpuMesh, GpuRenderer},
     pmf2, pzz,
     render::PreviewState,
-    save::rebuild_pzz_payload,
-    workspace::ModWorkspace,
+    save::rebuild_pzz_payload_cached,
+    workspace::{ModWorkspace, PzzWorkspace},
 };
 use anyhow::Result;
 use asset_tree::{AssetTreeState, TreeAction};
@@ -20,6 +20,7 @@ use editors::EditorWindows;
 use eframe::egui;
 use eframe::egui_wgpu::wgpu;
 use std::path::Path;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 pub(super) fn remember_parent_dir(memory: &mut Option<std::path::PathBuf>, path: &Path) {
     if let Some(dir) = path.parent() {
@@ -72,6 +73,13 @@ pub struct GvgModdingApp {
     gui_state_dirty: bool,
     /// User-dismissable error dialog; same text is mirrored in `status`.
     pending_alert: Option<String>,
+    save_afs_job: Option<SaveAfsJob>,
+}
+
+struct SaveAfsJob {
+    receiver: Receiver<Result<usize, String>>,
+    output_path: std::path::PathBuf,
+    dirty_count: usize,
 }
 
 pub fn run_native() -> eframe::Result<()> {
@@ -141,12 +149,15 @@ impl GvgModdingApp {
             last_dir_replace_stream_png: persisted.last_dir_replace_stream_png,
             gui_state_dirty: false,
             pending_alert: None,
+            save_afs_job: None,
         }
     }
 }
 
 impl eframe::App for GvgModdingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_save_afs_job(ctx);
+
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             self.menu_bar(ui);
         });
@@ -252,6 +263,46 @@ impl GvgModdingApp {
         self.pending_alert = Some(msg);
     }
 
+    fn poll_save_afs_job(&mut self, ctx: &egui::Context) {
+        let Some(job) = self.save_afs_job.as_ref() else {
+            return;
+        };
+        match job.receiver.try_recv() {
+            Ok(result) => {
+                let job = self.save_afs_job.take().expect("save job exists");
+                match result {
+                    Ok(byte_count) => {
+                        touch_dialog_dir_parent(
+                            &mut self.last_dir_write_modified_pzz_to_afs,
+                            &job.output_path,
+                            &mut self.gui_state_dirty,
+                        );
+                        self.workspace.push_log(format!(
+                            "Saved AFS with {} modified PZZ entries ({:.1} MB) -> {}",
+                            job.dirty_count,
+                            byte_count as f64 / (1024.0 * 1024.0),
+                            job.output_path.display()
+                        ));
+                        self.status = format!(
+                            "Saved AFS with {} modified PZZ entries ({:.1} MB) -> {}",
+                            job.dirty_count,
+                            byte_count as f64 / (1024.0 * 1024.0),
+                            job.output_path.display()
+                        );
+                    }
+                    Err(e) => self.notify_error(format!("Failed to save AFS: {e}")),
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.save_afs_job = None;
+                self.notify_error("Failed to save AFS: background worker stopped.".to_owned());
+            }
+        }
+    }
+
     fn gui_state_snapshot(&self) -> persist::PersistedGuiState {
         persist::PersistedGuiState {
             last_dir_open_afs: self.last_dir_open_afs.clone(),
@@ -335,12 +386,16 @@ impl GvgModdingApp {
                 });
                 ui.separator();
                 let has_afs = self.workspace.afs_path().is_some();
+                let can_save_afs = has_afs && self.save_afs_job.is_none();
                 if ui
-                    .add_enabled(has_afs, egui::Button::new("Save AFS As..."))
+                    .add_enabled(can_save_afs, egui::Button::new("Save AFS As..."))
                     .clicked()
                 {
                     self.save_afs_as_dialog();
                     ui.close();
+                }
+                if self.save_afs_job.is_some() {
+                    ui.label(egui::RichText::new("AFS save is running...").weak());
                 }
                 ui.separator();
                 if ui.button("Exit").clicked() {
@@ -428,8 +483,7 @@ impl GvgModdingApp {
                         &mut self.gui_state_dirty,
                     );
                     if paths_point_to_same_file(&afs_path, &output_path) {
-                        self.status =
-                            "Save target is the same file as the open AFS.".to_owned();
+                        self.status = "Save target is the same file as the open AFS.".to_owned();
                         return;
                     }
                     self.status = format!(
@@ -450,35 +504,35 @@ impl GvgModdingApp {
             return;
         }
 
-        match build_patched_afs_with_dirty_pzz_entries(&self.workspace, &afs_path).and_then(
-            |patched| {
-                std::fs::write(&output_path, &patched).map_err(anyhow::Error::from)?;
-                Ok(patched.len())
-            },
-        ) {
-            Ok(byte_count) => {
-                touch_dialog_dir_parent(
-                    &mut self.last_dir_write_modified_pzz_to_afs,
-                    &output_path,
-                    &mut self.gui_state_dirty,
-                );
-                self.workspace.push_log(format!(
-                    "Saved AFS with {} modified PZZ entries ({:.1} MB) -> {}",
-                    dirty_count,
-                    byte_count as f64 / (1024.0 * 1024.0),
-                    output_path.display()
-                ));
-                self.status = format!(
-                    "Saved AFS with {} modified PZZ entries ({:.1} MB) -> {}",
-                    dirty_count,
-                    byte_count as f64 / (1024.0 * 1024.0),
-                    output_path.display()
-                );
-            }
-            Err(e) => {
-                self.notify_error(format!("Failed to save AFS: {e}"));
-            }
-        }
+        let dirty_entries = self
+            .workspace
+            .dirty_pzz_entries()
+            .into_iter()
+            .map(|(entry_index, pzz)| (entry_index, pzz.clone()))
+            .collect::<Vec<_>>();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let afs_path_for_job = afs_path.clone();
+        let output_path_for_job = output_path.clone();
+        std::thread::spawn(move || {
+            let result =
+                build_patched_afs_with_dirty_pzz_entry_clones(dirty_entries, &afs_path_for_job)
+                    .and_then(|patched| {
+                        std::fs::write(&output_path_for_job, &patched)
+                            .map_err(anyhow::Error::from)?;
+                        Ok(patched.len())
+                    })
+                    .map_err(|e| e.to_string());
+            let _ = sender.send(result);
+        });
+        self.status = format!(
+            "Saving AFS with {} modified PZZ entries in background...",
+            dirty_count
+        );
+        self.save_afs_job = Some(SaveAfsJob {
+            receiver,
+            output_path,
+            dirty_count,
+        });
     }
 
     fn open_pzz_dialog(&mut self) {
@@ -1013,24 +1067,44 @@ impl GvgModdingApp {
     }
 }
 
-fn build_patched_afs_with_dirty_pzz_entries(
-    workspace: &ModWorkspace,
+fn build_patched_afs_with_dirty_pzz_entry_clones(
+    dirty_entries: Vec<(usize, PzzWorkspace)>,
     afs_path: &Path,
 ) -> Result<Vec<u8>> {
-    let dirty_entries = workspace.dirty_pzz_entries();
     if dirty_entries.is_empty() {
         anyhow::bail!("no modified PZZ entries are staged");
     }
 
+    let started = std::time::Instant::now();
     let mut rebuilt_entries = Vec::with_capacity(dirty_entries.len());
-    for (entry_index, pzz) in dirty_entries {
-        rebuilt_entries.push((entry_index, rebuild_pzz_payload(pzz)?));
+    for (entry_index, mut pzz) in dirty_entries {
+        rebuilt_entries.push((entry_index, rebuild_pzz_payload_cached(&mut pzz)?));
     }
+    rebuilt_entries.sort_by_key(|(entry_index, _)| *entry_index);
+    eprintln!(
+        "[gui] rebuilt {} dirty PZZ entries in {} ms",
+        rebuilt_entries.len(),
+        started.elapsed().as_millis()
+    );
 
-    let mut patched = std::fs::read(afs_path)?;
-    for (entry_index, rebuilt) in rebuilt_entries {
-        patched = afs::patch_entry_bytes(&patched, entry_index, &rebuilt)?;
-    }
+    let read_started = std::time::Instant::now();
+    let original = std::fs::read(afs_path)?;
+    eprintln!(
+        "[gui] read AFS {} bytes in {} ms",
+        original.len(),
+        read_started.elapsed().as_millis()
+    );
+    let patch_started = std::time::Instant::now();
+    let replacement_refs = rebuilt_entries
+        .iter()
+        .map(|(entry_index, rebuilt)| (*entry_index, rebuilt.as_slice()))
+        .collect::<Vec<_>>();
+    let patched = afs::patch_entries_bytes(&original, &replacement_refs)?;
+    eprintln!(
+        "[gui] patched {} AFS entries in {} ms",
+        replacement_refs.len(),
+        patch_started.elapsed().as_millis()
+    );
     Ok(patched)
 }
 

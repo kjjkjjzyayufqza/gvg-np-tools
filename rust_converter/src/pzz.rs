@@ -67,6 +67,13 @@ pub struct PzzInfo {
     pub body_size: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PzzRebuildResult {
+    pub raw: Vec<u8>,
+    pub decrypted_body: Vec<u8>,
+    pub tail: Option<[u8; 16]>,
+}
+
 fn parse_layout(raw: &[u8]) -> Option<PzzLayout> {
     let key = find_pzz_key(raw)?;
     let dec = xor_decrypt(raw, key);
@@ -132,6 +139,15 @@ fn stream_chunk_indices(layout: &PzzLayout) -> Vec<usize> {
             }
             decode_stream_chunk(&layout.chunks[i]).map(|_| i)
         })
+        .collect()
+}
+
+fn stream_chunk_indices_by_flag(layout: &PzzLayout) -> Vec<usize> {
+    layout
+        .descriptors
+        .iter()
+        .enumerate()
+        .filter_map(|(i, desc)| (desc & 0x4000_0000 != 0).then_some(i))
         .collect()
 }
 
@@ -389,6 +405,13 @@ pub fn rebuild_stream_archive_with_original_key(
     original_pzz: &[u8],
     streams: &[Vec<u8>],
 ) -> Result<Vec<u8>> {
+    Ok(rebuild_stream_archive_with_original_key_result(original_pzz, streams)?.raw)
+}
+
+pub fn rebuild_stream_archive_with_original_key_result(
+    original_pzz: &[u8],
+    streams: &[Vec<u8>],
+) -> Result<PzzRebuildResult> {
     let info = inspect_pzz(original_pzz)?;
     let expected_stream_archive_chunks = info.stream_count + 1;
     if info.chunk_count != expected_stream_archive_chunks {
@@ -401,24 +424,48 @@ pub fn rebuild_stream_archive_with_original_key(
     let new_body_size = dec.len();
     let new_key = derive_xor_key_from_size(new_body_size);
     let mut encrypted = xor_decrypt(&dec, new_key);
-    if info.has_tail {
-        encrypted.extend_from_slice(&compute_pzz_tail(&dec));
+    let tail = info.has_tail.then(|| compute_pzz_tail(&dec));
+    if let Some(tail) = tail {
+        encrypted.extend_from_slice(&tail);
     }
-    Ok(encrypted)
+    Ok(PzzRebuildResult {
+        raw: encrypted,
+        decrypted_body: dec,
+        tail,
+    })
 }
 
 pub fn rebuild_pzz_from_original(original_pzz: &[u8], streams: &[Vec<u8>]) -> Option<Vec<u8>> {
+    rebuild_pzz_from_original_result(original_pzz, streams).map(|result| result.raw)
+}
+
+pub fn rebuild_pzz_from_original_result(
+    original_pzz: &[u8],
+    streams: &[Vec<u8>],
+) -> Option<PzzRebuildResult> {
+    let dirty_stream_indices = (0..streams.len()).collect::<Vec<_>>();
+    rebuild_pzz_from_original_dirty_result(original_pzz, streams, &dirty_stream_indices)
+}
+
+pub fn rebuild_pzz_from_original_dirty_result(
+    original_pzz: &[u8],
+    streams: &[Vec<u8>],
+    dirty_stream_indices: &[usize],
+) -> Option<PzzRebuildResult> {
     let mut layout = parse_layout(original_pzz)?;
-    let stream_chunks = stream_chunk_indices(&layout);
+    let stream_chunks = stream_chunk_indices_by_flag(&layout);
     if stream_chunks.len() != streams.len() {
         return None;
     }
-    for (stream_idx, chunk_idx) in stream_chunks.into_iter().enumerate() {
-        if let Some(old_decoded) = decode_stream_chunk(&layout.chunks[chunk_idx]) {
-            if old_decoded == streams[stream_idx] {
-                continue;
-            }
-        }
+    let dirty = dirty_stream_indices
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if dirty.iter().any(|index| *index >= streams.len()) {
+        return None;
+    }
+    for stream_idx in dirty {
+        let chunk_idx = stream_chunks[stream_idx];
         let old_units = (layout.descriptors[chunk_idx] & 0x3FFF_FFFF) as usize;
         let old_capacity = old_units * 128;
         let stream_data = &streams[stream_idx];
@@ -485,15 +532,16 @@ pub fn rebuild_pzz_from_original(original_pzz: &[u8], streams: &[Vec<u8>]) -> Op
             new_key
         );
     }
-    let encrypted_body = xor_decrypt(&dec, new_key);
-    if has_tail {
-        let new_tail = compute_pzz_tail(&dec);
-        let mut result = encrypted_body;
-        result.extend_from_slice(&new_tail);
-        Some(result)
-    } else {
-        Some(encrypted_body)
+    let mut raw = xor_decrypt(&dec, new_key);
+    let tail = has_tail.then(|| compute_pzz_tail(&dec));
+    if let Some(tail) = tail {
+        raw.extend_from_slice(&tail);
     }
+    Some(PzzRebuildResult {
+        raw,
+        decrypted_body: dec,
+        tail,
+    })
 }
 
 const SBOX1: [u8; 256] = [
@@ -736,5 +784,53 @@ mod tests {
         let extracted = extract_pzz_streams(&rebuilt);
         assert_eq!(extracted.len(), 2);
         assert_eq!(extracted[0], new_streams[0]);
+    }
+
+    #[test]
+    fn rebuild_result_exposes_decrypted_body_and_tail_from_single_rebuild() {
+        let original = build_pzz_with_tail(&[b"PMF2_original".to_vec()], 0x1234_5678, true);
+        let new_streams = vec![b"PMF2_changed".to_vec()];
+
+        let rebuilt = rebuild_pzz_from_original_result(&original, &new_streams).unwrap();
+
+        assert_eq!(
+            rebuilt.raw,
+            rebuild_pzz_from_original(&original, &new_streams).unwrap()
+        );
+        assert_eq!(
+            rebuilt.tail,
+            Some(compute_pzz_tail(&rebuilt.decrypted_body))
+        );
+        assert_eq!(
+            rebuilt.decrypted_body,
+            decrypt_pzz_body(&rebuilt.raw).unwrap()
+        );
+    }
+
+    #[test]
+    fn dirty_stream_rebuild_reuses_clean_original_chunks() {
+        let original = build_pzz(
+            &[
+                b"PMF2_stream0_original".to_vec(),
+                b"MIG.00.1PSP_stream1_original".to_vec(),
+            ],
+            0x1234_5678,
+        );
+        let streams = vec![
+            b"PMF2_stream0_changed".to_vec(),
+            b"MIG.00.1PSP_stream1_original".to_vec(),
+        ];
+
+        let rebuilt = rebuild_pzz_from_original_dirty_result(&original, &streams, &[0]).unwrap();
+        let original_layout = parse_layout(&original).unwrap();
+        let rebuilt_layout = parse_layout(&rebuilt.raw).unwrap();
+        let original_stream_chunks = stream_chunk_indices_by_flag(&original_layout);
+        let rebuilt_stream_chunks = stream_chunk_indices_by_flag(&rebuilt_layout);
+
+        assert_eq!(
+            rebuilt_layout.chunks[rebuilt_stream_chunks[1]],
+            original_layout.chunks[original_stream_chunks[1]]
+        );
+        assert_eq!(extract_pzz_streams(&rebuilt.raw), streams);
     }
 }

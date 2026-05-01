@@ -4,6 +4,7 @@ use crate::{
     workspace::PzzWorkspace,
 };
 use anyhow::{bail, Result};
+use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct PzzSavePlan {
@@ -51,6 +52,7 @@ impl PzzSavePlanner {
     }
 
     pub fn plan_preserving_layout(&self) -> Result<PzzSavePlan> {
+        let started = Instant::now();
         let info = pzz::inspect_pzz(&self.original_pzz)?;
         if info.stream_count != self.streams.len() {
             bail!(
@@ -65,33 +67,35 @@ impl PzzSavePlanner {
             .zip(self.streams.iter())
             .filter(|(old, new)| old.as_slice() != new.as_slice())
             .count();
-        let rebuilt_pzz = pzz::rebuild_pzz_from_original(&self.original_pzz, &self.streams)
+        let rebuilt = pzz::rebuild_pzz_from_original_result(&self.original_pzz, &self.streams)
             .ok_or_else(|| anyhow::anyhow!("failed to rebuild PZZ from original layout"))?;
-        let decrypted_body = pzz::decrypt_pzz_body(&rebuilt_pzz)?;
-        let rebuilt_tail = if info.has_tail {
-            Some(pzz::compute_pzz_tail(&decrypted_body))
-        } else {
-            None
-        };
         let mut validation_messages = Vec::new();
         validation_messages.push(format!("{} streams validated", self.streams.len()));
         if info.has_tail {
             validation_messages.push("PZZ 16-byte tail will be recomputed".to_string());
         }
+        eprintln!(
+            "[save] plan_preserving_layout: streams={}, changed={}, rebuilt_size={}, elapsed_ms={}",
+            self.streams.len(),
+            changed_stream_count,
+            rebuilt.raw.len(),
+            started.elapsed().as_millis()
+        );
         Ok(PzzSavePlan {
             original_size: self.original_pzz.len(),
-            rebuilt_size: rebuilt_pzz.len(),
+            rebuilt_size: rebuilt.raw.len(),
             stream_count: self.streams.len(),
             changed_stream_count,
             tail_recomputed: info.has_tail,
-            rebuilt_tail,
-            decrypted_body,
-            rebuilt_pzz,
+            rebuilt_tail: rebuilt.tail,
+            decrypted_body: rebuilt.decrypted_body,
+            rebuilt_pzz: rebuilt.raw,
             validation_messages,
         })
     }
 
     pub fn plan_stream_archive_rebuild(&self) -> Result<PzzSavePlan> {
+        let started = Instant::now();
         let info = pzz::inspect_pzz(&self.original_pzz)?;
         let original_streams = pzz::extract_pzz_streams(&self.original_pzz);
         let changed_stream_count = self
@@ -104,41 +108,86 @@ impl PzzSavePlanner {
                     .is_none_or(|old| old.as_slice() != stream.as_slice())
             })
             .count();
-        let rebuilt_pzz =
-            pzz::rebuild_stream_archive_with_original_key(&self.original_pzz, &self.streams)?;
-        let decrypted_body = pzz::decrypt_pzz_body(&rebuilt_pzz)?;
-        let rebuilt_tail = if info.has_tail {
-            Some(pzz::compute_pzz_tail(&decrypted_body))
-        } else {
-            None
-        };
+        let rebuilt = pzz::rebuild_stream_archive_with_original_key_result(
+            &self.original_pzz,
+            &self.streams,
+        )?;
         let mut validation_messages = Vec::new();
         validation_messages.push(format!("{} streams rebuilt", self.streams.len()));
         if info.has_tail {
             validation_messages.push("PZZ 16-byte tail will be recomputed".to_string());
         }
+        eprintln!(
+            "[save] plan_stream_archive_rebuild: streams={}, changed={}, rebuilt_size={}, elapsed_ms={}",
+            self.streams.len(),
+            changed_stream_count,
+            rebuilt.raw.len(),
+            started.elapsed().as_millis()
+        );
         Ok(PzzSavePlan {
             original_size: self.original_pzz.len(),
-            rebuilt_size: rebuilt_pzz.len(),
+            rebuilt_size: rebuilt.raw.len(),
             stream_count: self.streams.len(),
             changed_stream_count,
             tail_recomputed: info.has_tail,
-            rebuilt_tail,
-            decrypted_body,
-            rebuilt_pzz,
+            rebuilt_tail: rebuilt.tail,
+            decrypted_body: rebuilt.decrypted_body,
+            rebuilt_pzz: rebuilt.raw,
             validation_messages,
         })
     }
 }
 
 pub fn rebuild_pzz_payload(pzz: &PzzWorkspace) -> Result<Vec<u8>> {
+    let started = Instant::now();
     let planner = PzzSavePlanner::new(pzz.original(), pzz.stream_data().to_vec());
     let original_stream_count = pzz::inspect_pzz(pzz.original())?.stream_count;
-    if original_stream_count == pzz.stream_data().len() {
-        Ok(planner.plan_preserving_layout()?.rebuilt_pzz)
+    let rebuilt = if original_stream_count == pzz.stream_data().len() {
+        planner.plan_preserving_layout()?.rebuilt_pzz
     } else {
-        Ok(planner.plan_stream_archive_rebuild()?.rebuilt_pzz)
+        planner.plan_stream_archive_rebuild()?.rebuilt_pzz
+    };
+    eprintln!(
+        "[save] rebuild_pzz_payload: name={}, size={}, elapsed_ms={}",
+        pzz.name(),
+        rebuilt.len(),
+        started.elapsed().as_millis()
+    );
+    Ok(rebuilt)
+}
+
+pub fn rebuild_pzz_payload_cached(pzz: &mut PzzWorkspace) -> Result<Vec<u8>> {
+    if let Some(payload) = pzz.cached_rebuild_payload() {
+        eprintln!(
+            "[save] rebuild_pzz_payload_cached: name={}, size={}, cache=hit",
+            pzz.name(),
+            payload.len()
+        );
+        return Ok(payload.to_vec());
     }
+    let started = Instant::now();
+    let original_stream_count = pzz::inspect_pzz(pzz.original())?.stream_count;
+    let dirty_stream_indices = pzz.dirty_stream_indices();
+    let rebuilt = if original_stream_count == pzz.stream_data().len() {
+        pzz::rebuild_pzz_from_original_dirty_result(
+            pzz.original(),
+            pzz.stream_data(),
+            &dirty_stream_indices,
+        )
+        .ok_or_else(|| anyhow::anyhow!("failed to rebuild PZZ from original layout"))?
+        .raw
+    } else {
+        pzz::rebuild_stream_archive_with_original_key_result(pzz.original(), pzz.stream_data())?.raw
+    };
+    pzz.store_cached_rebuild(rebuilt.clone());
+    eprintln!(
+        "[save] rebuild_pzz_payload_cached: name={}, dirty_streams={}, size={}, cache=miss, elapsed_ms={}",
+        pzz.name(),
+        dirty_stream_indices.len(),
+        rebuilt.len(),
+        started.elapsed().as_millis()
+    );
+    Ok(rebuilt)
 }
 
 impl AfsSavePlanner {

@@ -312,56 +312,137 @@ pub fn patch_afs_entry(
 }
 
 pub fn patch_entry_bytes(original: &[u8], entry_index: usize, new_data: &[u8]) -> Result<Vec<u8>> {
-    let _plan = plan_patch_entry(original, entry_index, new_data.len())?;
+    patch_entries_bytes(original, &[(entry_index, new_data)])
+}
+
+pub fn patch_entries_bytes(original: &[u8], replacements: &[(usize, &[u8])]) -> Result<Vec<u8>> {
+    if replacements.is_empty() {
+        return Ok(original.to_vec());
+    }
+    if original.len() < 16 {
+        bail!("AFS data is too small");
+    }
+    if &original[0..4] != b"AFS\0" {
+        bail!("unsupported AFS magic");
+    }
     let file_count = ru32(original, 4) as usize;
+    if file_count == 0 {
+        bail!("AFS file count is zero");
+    }
 
     let table_offset = 8;
-    let entry_off_pos = table_offset + entry_index * 8;
-    let old_offset = ru32(original, entry_off_pos) as usize;
-    let old_size = ru32(original, entry_off_pos + 4) as usize;
     let name_table_pos = table_offset + file_count * 8;
+    if name_table_pos + 8 > original.len() {
+        bail!("AFS name table descriptor exceeds file size");
+    }
     let name_off = ru32(original, name_table_pos) as usize;
     let name_size = ru32(original, name_table_pos + 4) as usize;
-    let old_aligned = align_up(old_size, 2048);
-    let new_aligned = align_up(new_data.len(), 2048);
-    let delta_aligned = new_aligned as isize - old_aligned as isize;
 
-    let mut patched_entry = Vec::with_capacity(new_aligned);
-    patched_entry.extend_from_slice(new_data);
-    patched_entry.resize(new_aligned, 0);
+    #[derive(Clone)]
+    struct EntryInfo {
+        offset: usize,
+        size: usize,
+        aligned_size: usize,
+    }
 
-    let mut result = if delta_aligned == 0 {
-        let mut out = original.to_vec();
-        let end = old_offset + old_aligned;
-        out[old_offset..end].copy_from_slice(&patched_entry);
-        out
-    } else {
-        let mut out = Vec::with_capacity(original.len().saturating_add_signed(delta_aligned));
-        let old_end = old_offset + old_aligned;
-        out.extend_from_slice(&original[..old_offset]);
-        out.extend_from_slice(&patched_entry);
-        out.extend_from_slice(&original[old_end..]);
-        out
+    let mut entries = Vec::with_capacity(file_count);
+    for index in 0..file_count {
+        let pos = table_offset + index * 8;
+        if pos + 8 > original.len() {
+            bail!("AFS entry table exceeds file size");
+        }
+        let offset = ru32(original, pos) as usize;
+        let size = ru32(original, pos + 4) as usize;
+        let aligned_size = align_up(size, 2048);
+        let end = offset
+            .checked_add(aligned_size)
+            .ok_or_else(|| anyhow::anyhow!("AFS entry {} aligned size overflows", index))?;
+        if offset > original.len() || end > original.len() {
+            bail!("AFS entry {} exceeds file size", index);
+        }
+        entries.push(EntryInfo {
+            offset,
+            size,
+            aligned_size,
+        });
+    }
+
+    let mut replacements = replacements
+        .iter()
+        .map(|(index, data)| {
+            if *index >= file_count {
+                bail!(
+                    "Entry index {} out of range (max {})",
+                    index,
+                    file_count.saturating_sub(1)
+                );
+            }
+            let entry = &entries[*index];
+            Ok((
+                *index,
+                *data,
+                entry.offset,
+                entry.aligned_size,
+                align_up(data.len(), 2048),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    replacements.sort_by_key(|(_, _, offset, _, _)| *offset);
+    for pair in replacements.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            bail!("AFS entry {} has multiple replacements", pair[0].0);
+        }
+        let prev_end = pair[0].2 + pair[0].3;
+        if prev_end > pair[1].2 {
+            bail!(
+                "AFS replacement entries {} and {} overlap",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+    }
+
+    let total_delta = replacements.iter().fold(0isize, |acc, replacement| {
+        acc + replacement.4 as isize - replacement.3 as isize
+    });
+    let new_len = original.len().saturating_add_signed(total_delta);
+    let mut result = Vec::with_capacity(new_len);
+    let mut cursor = 0usize;
+    for (_, data, old_offset, old_aligned, new_aligned) in &replacements {
+        result.extend_from_slice(&original[cursor..*old_offset]);
+        result.extend_from_slice(data);
+        result.resize(result.len() + (new_aligned - data.len()), 0);
+        cursor = old_offset + old_aligned;
+    }
+    result.extend_from_slice(&original[cursor..]);
+
+    let shift_before = |offset: usize| -> isize {
+        replacements
+            .iter()
+            .filter(|(_, _, replaced_offset, _, _)| *replaced_offset < offset)
+            .map(|(_, _, _, old_aligned, new_aligned)| {
+                *new_aligned as isize - *old_aligned as isize
+            })
+            .sum()
     };
 
     for i in 0..file_count {
         let pos = table_offset + i * 8;
-        let off = ru32(original, pos) as isize;
-        let sz = ru32(original, pos + 4) as usize;
-        let new_off = if i == entry_index {
-            old_offset as isize
-        } else if delta_aligned != 0 && off > old_offset as isize {
-            off + delta_aligned
+        let entry = &entries[i];
+        let new_off = entry.offset as isize + shift_before(entry.offset);
+        let new_sz = if let Some((_, data, _, _, _)) =
+            replacements.iter().find(|(index, _, _, _, _)| *index == i)
+        {
+            data.len()
         } else {
-            off
+            entry.size
         };
         result[pos..pos + 4].copy_from_slice(&(new_off as u32).to_le_bytes());
-        let new_sz = if i == entry_index { new_data.len() } else { sz };
         result[pos + 4..pos + 8].copy_from_slice(&(new_sz as u32).to_le_bytes());
     }
 
-    let shifted_name_off = if delta_aligned != 0 && name_off > old_offset {
-        (name_off as isize + delta_aligned) as usize
+    let shifted_name_off = if name_off > 0 {
+        (name_off as isize + shift_before(name_off)) as usize
     } else {
         name_off
     };
@@ -374,10 +455,12 @@ pub fn patch_entry_bytes(original: &[u8], entry_index: usize, new_data: &[u8]) -
         && name_size >= file_count * 0x30
         && shifted_name_off + name_size <= result.len()
     {
-        let row_off = shifted_name_off + entry_index * 0x30;
-        if row_off + 0x30 <= result.len() {
-            result[row_off + 0x2C..row_off + 0x30]
-                .copy_from_slice(&(new_data.len() as u32).to_le_bytes());
+        for (entry_index, new_data, _, _, _) in &replacements {
+            let row_off = shifted_name_off + entry_index * 0x30;
+            if row_off + 0x30 <= result.len() {
+                result[row_off + 0x2C..row_off + 0x30]
+                    .copy_from_slice(&(new_data.len() as u32).to_le_bytes());
+            }
         }
     }
 
@@ -439,5 +522,34 @@ mod tests {
                 ..inventory.entries[2].offset + b"entry2-updated-expanded".len()],
             b"entry2-updated-expanded"
         );
+    }
+
+    #[test]
+    fn patch_entries_bytes_matches_sequential_patch_entry_bytes() {
+        let original = build_afs(&[
+            b"entry0-original",
+            b"entry1-original-with-more-data",
+            b"entry2-original",
+            b"entry3-original",
+        ]);
+
+        let sequential_once = patch_entry_bytes(&original, 0, b"entry0-updated-expanded").unwrap();
+        let sequential = patch_entry_bytes(&sequential_once, 2, b"e2").unwrap();
+
+        let replacements = vec![
+            (0usize, b"entry0-updated-expanded".as_slice()),
+            (2usize, b"e2".as_slice()),
+        ];
+        let patched = patch_entries_bytes(&original, &replacements).unwrap();
+
+        assert_eq!(patched, sequential);
+        let inventory = scan_inventory(&patched, Some("test.bin".to_string())).unwrap();
+        assert_eq!(inventory.entries[0].size, b"entry0-updated-expanded".len());
+        assert_eq!(
+            inventory.entries[1].size,
+            b"entry1-original-with-more-data".len()
+        );
+        assert_eq!(inventory.entries[2].size, b"e2".len());
+        assert_eq!(inventory.entries[3].size, b"entry3-original".len());
     }
 }

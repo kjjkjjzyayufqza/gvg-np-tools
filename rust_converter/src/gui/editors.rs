@@ -1,6 +1,6 @@
 use crate::{
     pmf2, pzz,
-    save::{rebuild_pzz_payload, PzzSavePlan, PzzSavePlanner},
+    save::{rebuild_pzz_payload, rebuild_pzz_payload_cached, PzzSavePlan, PzzSavePlanner},
     texture::GimImage,
     workspace::{EntryValidation, ModWorkspace},
 };
@@ -213,12 +213,9 @@ pub fn show_editor_windows(
             .default_size([640.0, 480.0])
             .resizable(true)
             .show(ctx, |ui| {
-                if let Some(result) = show_cwcheat_editor(
-                    ui,
-                    workspace,
-                    &mut editors.cwcheat_state,
-                    last_dir_cwcheat,
-                ) {
+                if let Some(result) =
+                    show_cwcheat_editor(ui, workspace, &mut editors.cwcheat_state, last_dir_cwcheat)
+                {
                     action.accumulate_from(result);
                 }
             });
@@ -706,7 +703,7 @@ fn patch_afs_dialog(workspace: &ModWorkspace, last_dir: &mut Option<PathBuf>) ->
 
 fn show_cwcheat_editor(
     ui: &mut egui::Ui,
-    workspace: &ModWorkspace,
+    workspace: &mut ModWorkspace,
     state: &mut CwCheatEditorState,
     last_dir: &mut Option<PathBuf>,
 ) -> Option<EditorAction> {
@@ -729,16 +726,17 @@ fn show_cwcheat_editor(
                         ));
                     }
                     Err(e) => {
-                        result = Some(EditorAction::error(format!(
-                            "Failed to read file: {e}"
-                        )));
+                        result = Some(EditorAction::error(format!("Failed to read file: {e}")));
                     }
                 }
             }
         }
 
         let can_save = state.path.is_some();
-        if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
+        if ui
+            .add_enabled(can_save, egui::Button::new("Save"))
+            .clicked()
+        {
             if let Some(path) = &state.path {
                 match std::fs::write(path, &state.text) {
                     Ok(()) => {
@@ -748,9 +746,7 @@ fn show_cwcheat_editor(
                         )));
                     }
                     Err(e) => {
-                        result = Some(EditorAction::error(format!(
-                            "Failed to save file: {e}"
-                        )));
+                        result = Some(EditorAction::error(format!("Failed to save file: {e}")));
                     }
                 }
             }
@@ -779,9 +775,7 @@ fn show_cwcheat_editor(
                         )));
                     }
                     Err(e) => {
-                        result = Some(EditorAction::error(format!(
-                            "Failed to save file: {e}"
-                        )));
+                        result = Some(EditorAction::error(format!("Failed to save file: {e}")));
                     }
                 }
             }
@@ -831,9 +825,7 @@ fn show_cwcheat_editor(
                 )));
             }
             Err(e) => {
-                result = Some(EditorAction::error(format!(
-                    "Auto update failed: {e}"
-                )));
+                result = Some(EditorAction::error(format!("Auto update failed: {e}")));
             }
         }
     }
@@ -856,7 +848,7 @@ fn show_cwcheat_editor(
 /// Returns `(updated_text, entry_count)`.
 fn update_cwcheat_body_sizes(
     current_text: &str,
-    workspace: &ModWorkspace,
+    workspace: &mut ModWorkspace,
 ) -> std::result::Result<(String, usize), String> {
     let mut header_lines: Vec<String> = Vec::new();
     let mut other_groups: Vec<Vec<String>> = Vec::new();
@@ -902,12 +894,12 @@ fn update_cwcheat_body_sizes(
     }
 
     // Rebuild dirty PZZ entries to get their final file sizes.
-    let dirty_entries = workspace.dirty_pzz_entries();
     let mut dirty_rebuilt_sizes = std::collections::BTreeMap::<usize, usize>::new();
-    for (entry_index, pzz_ws) in &dirty_entries {
-        let rebuilt = rebuild_pzz_payload(pzz_ws)
-            .map_err(|e| format!("Failed to rebuild entry {}: {}", entry_index, e))?;
-        dirty_rebuilt_sizes.insert(*entry_index, rebuilt.len());
+    let rebuilt_entries = workspace
+        .rebuild_dirty_pzz_entries_with(rebuild_pzz_payload_cached)
+        .map_err(|e| format!("Failed to rebuild dirty PZZ entries: {}", e))?;
+    for (entry_index, rebuilt) in rebuilt_entries {
+        dirty_rebuilt_sizes.insert(entry_index, rebuilt.len());
     }
 
     let mut output = String::new();
@@ -949,10 +941,7 @@ fn update_cwcheat_body_sizes(
             continue;
         }
         let rom_addr = ROM_TABLE_BASE.wrapping_add((entry.index as u32) * 4);
-        let base_name = entry
-            .name
-            .trim_end_matches(".pzz")
-            .trim_end_matches(".bin");
+        let base_name = entry.name.trim_end_matches(".pzz").trim_end_matches(".bin");
         entries.push(BodySizeEntry {
             name: base_name.to_string(),
             cwcheat_addr: CWCHEAT_WRITE32_PREFIX | (rom_addr - PSP_VA_OFFSET),
@@ -1000,4 +989,3 @@ fn update_cwcheat_body_sizes(
 
     Ok((output, total_entry_count))
 }
-

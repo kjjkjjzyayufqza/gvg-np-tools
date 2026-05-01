@@ -49,6 +49,14 @@ pub struct PzzWorkspace {
     original: Vec<u8>,
     streams: Vec<Vec<u8>>,
     stream_nodes: Vec<StreamNode>,
+    revision: u64,
+    cached_rebuild: Option<CachedPzzRebuild>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedPzzRebuild {
+    revision: u64,
+    payload: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -158,6 +166,10 @@ impl ModWorkspace {
         self.open_pzz.as_ref()
     }
 
+    pub fn open_pzz_mut(&mut self) -> Option<&mut PzzWorkspace> {
+        self.open_pzz.as_mut()
+    }
+
     pub fn expanded_pzz_entry(&self) -> Option<usize> {
         self.expanded_pzz_entry
     }
@@ -197,6 +209,30 @@ impl ModWorkspace {
 
     pub fn dirty_pzz_entry_count(&self) -> usize {
         self.dirty_pzz_entries().len()
+    }
+
+    pub fn rebuild_dirty_pzz_entries_with<F>(
+        &mut self,
+        mut rebuild: F,
+    ) -> Result<Vec<(usize, Vec<u8>)>>
+    where
+        F: FnMut(&mut PzzWorkspace) -> Result<Vec<u8>>,
+    {
+        let mut rebuilt = Vec::new();
+        for (entry_index, pzz) in self.staged_pzz.iter_mut() {
+            if pzz.is_dirty() {
+                rebuilt.push((*entry_index, rebuild(pzz)?));
+            }
+        }
+        if let Some(pzz) = self.open_pzz.as_mut() {
+            if let Some(entry_index) = pzz.afs_entry_index() {
+                if pzz.is_dirty() && !rebuilt.iter().any(|(index, _)| *index == entry_index) {
+                    rebuilt.push((entry_index, rebuild(pzz)?));
+                }
+            }
+        }
+        rebuilt.sort_by_key(|(entry_index, _)| *entry_index);
+        Ok(rebuilt)
     }
 
     pub fn operation_log(&self) -> &[String] {
@@ -364,6 +400,8 @@ impl PzzWorkspace {
             original,
             streams,
             stream_nodes,
+            revision: 0,
+            cached_rebuild: None,
         })
     }
 
@@ -387,8 +425,33 @@ impl PzzWorkspace {
         &self.stream_nodes
     }
 
+    pub fn dirty_stream_indices(&self) -> Vec<usize> {
+        self.stream_nodes
+            .iter()
+            .filter_map(|stream| stream.dirty.then_some(stream.index))
+            .collect()
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.stream_nodes.iter().any(|s| s.dirty)
+    }
+
+    pub fn cached_rebuild_payload(&self) -> Option<&[u8]> {
+        self.cached_rebuild
+            .as_ref()
+            .filter(|cache| cache.revision == self.revision)
+            .map(|cache| cache.payload.as_slice())
+    }
+
+    pub fn cached_rebuild_size(&self) -> Option<usize> {
+        self.cached_rebuild_payload().map(|payload| payload.len())
+    }
+
+    pub fn store_cached_rebuild(&mut self, payload: Vec<u8>) {
+        self.cached_rebuild = Some(CachedPzzRebuild {
+            revision: self.revision,
+            payload,
+        });
     }
 
     pub fn replace_stream(&mut self, index: usize, data: Vec<u8>) -> Result<()> {
@@ -397,6 +460,8 @@ impl PzzWorkspace {
         }
         self.streams[index] = data;
         self.stream_nodes[index] = stream_to_node(index, None, &self.streams[index], true);
+        self.revision = self.revision.wrapping_add(1);
+        self.cached_rebuild = None;
         Ok(())
     }
 }
@@ -518,5 +583,25 @@ mod tests {
         assert_eq!(open.stream_data()[0], b"PMF2_entry0_modified");
         assert!(open.is_dirty());
         assert_eq!(workspace.staged_dirty_pzz_entry_count(), 0);
+    }
+
+    #[test]
+    fn cached_rebuild_is_reused_until_stream_changes() {
+        let pzz = pzz::build_pzz(&[b"PMF2_entry0".to_vec()], 0x1234_5678);
+        let mut workspace = ModWorkspace::open_pzz_bytes("test.pzz", pzz).unwrap();
+        workspace
+            .replace_stream(0, b"PMF2_entry0_modified".to_vec())
+            .unwrap();
+
+        let open = workspace.open_pzz_mut().unwrap();
+        let first = crate::save::rebuild_pzz_payload_cached(open).unwrap();
+        assert_eq!(open.cached_rebuild_size(), Some(first.len()));
+
+        let second = crate::save::rebuild_pzz_payload_cached(open).unwrap();
+        assert_eq!(second, first);
+
+        open.replace_stream(0, b"PMF2_entry0_modified_again".to_vec())
+            .unwrap();
+        assert_eq!(open.cached_rebuild_size(), None);
     }
 }

@@ -67,7 +67,7 @@ pub fn write_dae(
             source_normals.push(v.nz as f64);
             if mesh.has_uv {
                 uvs.push(v.u as f64);
-                uvs.push(v.v as f64);
+                uvs.push(pmf2_v_to_collada(v.v) as f64);
             }
         }
 
@@ -343,6 +343,14 @@ fn append_triangle_indices(out: &mut String, indices: &[usize], has_normals: boo
             write!(out, "{}", idx).unwrap();
         }
     }
+}
+
+fn pmf2_v_to_collada(v: f32) -> f32 {
+    1.0 - v
+}
+
+fn collada_v_to_pmf2(v: f32) -> f32 {
+    1.0 - v
 }
 
 fn orient_triangle_winding(positions: &[f64], indices: &mut [usize], source_normals: &[f64]) {
@@ -812,7 +820,7 @@ fn parse_dae_to_meta_text(xml: &str, model_name: &str) -> Result<Pmf2Meta> {
             let (lx, ly, lz) = transform_point_f32(&inv_world, wx, wy, wz);
             let (wnx, wny, wnz) = dae_to_game_direction(v[5], v[6], v[7]);
             let (lnx, lny, lnz) = normalize3(transform_direction_f32(&inv_world, wnx, wny, wnz));
-            local_vertices.push([lx, ly, lz, v[3], v[4], lnx, lny, lnz]);
+            local_vertices.push([lx, ly, lz, v[3], collada_v_to_pmf2(v[4]), lnx, lny, lnz]);
         }
 
         let entry = mesh_by_bone
@@ -1831,6 +1839,63 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(text.contains("semantic=\"NORMAL\""));
         assert!(text.contains("semantic=\"TEXCOORD\""));
+    }
+
+    #[test]
+    fn dae_export_flips_v_for_collada_coordinates() {
+        let path = tmp_path("gvg_dae_uv_export");
+        let meshes = vec![mesh(0, "root", true, true)];
+        let sections = vec![section(0, "root", -1, 0.0, 0.0, 0.0)];
+        write_dae(&path, &meshes, &sections, "pl00_stream000").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            text.contains(">0.000000 1.000000 1.000000 1.000000 0.000000 0.000000</float_array>")
+        );
+    }
+
+    #[test]
+    fn dae_import_flips_v_back_to_pmf2_coordinates() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <library_geometries>
+    <geometry id="geom0" name="root">
+      <mesh>
+        <source id="geom0-positions">
+          <float_array id="geom0-positions-array" count="9">0 0 0 1 0 0 0 1 0</float_array>
+          <technique_common><accessor source="#geom0-positions-array" count="3" stride="3"/></technique_common>
+        </source>
+        <source id="geom0-map-0">
+          <float_array id="geom0-map-0-array" count="6">0.25 0.25 0.5 0.5 0.75 0.75</float_array>
+          <technique_common><accessor source="#geom0-map-0-array" count="3" stride="2"/></technique_common>
+        </source>
+        <vertices id="geom0-vertices">
+          <input semantic="POSITION" source="#geom0-positions"/>
+        </vertices>
+        <triangles count="1">
+          <input semantic="VERTEX" source="#geom0-vertices" offset="0"/>
+          <input semantic="TEXCOORD" source="#geom0-map-0" offset="1"/>
+          <p>0 0 1 1 2 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="root" name="root">
+        <instance_geometry url="#geom0"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>"##;
+
+        let meta = parse_dae_to_meta_text(xml, "uv_import").unwrap();
+        let verts = &meta.bone_meshes[0].local_vertices;
+        assert!((verts[0][4] - 0.75).abs() < 1e-6);
+        assert!((verts[1][4] - 0.5).abs() < 1e-6);
+        assert!((verts[2][4] - 0.25).abs() < 1e-6);
     }
 
     #[test]
