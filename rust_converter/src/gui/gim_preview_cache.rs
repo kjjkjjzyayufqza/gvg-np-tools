@@ -125,6 +125,9 @@ mod tests {
 
     #[test]
     fn gim_data_identity_changes_when_same_revision_stream_bytes_change() {
-        assert_ne!(gim_data_identity(b"first gim"), gim_data_identity(b"second gim"));
+        assert_ne!(
+            gim_data_identity(b"first gim"),
+            gim_data_identity(b"second gim")
+        );
     }
 }

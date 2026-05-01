@@ -11,6 +11,58 @@ pub enum PixelFormat {
     Indexed8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GimReplaceFormat {
+    Auto,
+    Indexed8,
+    Rgba5650,
+    Rgba4444,
+    Rgba8888,
+}
+
+impl GimReplaceFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            GimReplaceFormat::Auto => "Auto (RGBA4444)",
+            GimReplaceFormat::Indexed8 => "Indexed8 + RGBA5551 palette",
+            GimReplaceFormat::Rgba5650 => "RGBA5650",
+            GimReplaceFormat::Rgba4444 => "RGBA4444",
+            GimReplaceFormat::Rgba8888 => "RGBA8888",
+        }
+    }
+
+    pub fn all() -> &'static [GimReplaceFormat] {
+        &[
+            GimReplaceFormat::Auto,
+            GimReplaceFormat::Indexed8,
+            GimReplaceFormat::Rgba4444,
+            GimReplaceFormat::Rgba5650,
+            GimReplaceFormat::Rgba8888,
+        ]
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            GimReplaceFormat::Auto => "auto",
+            GimReplaceFormat::Indexed8 => "indexed8",
+            GimReplaceFormat::Rgba5650 => "rgba5650",
+            GimReplaceFormat::Rgba4444 => "rgba4444",
+            GimReplaceFormat::Rgba8888 => "rgba8888",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "auto" => Some(GimReplaceFormat::Auto),
+            "indexed8" => Some(GimReplaceFormat::Indexed8),
+            "rgba5650" => Some(GimReplaceFormat::Rgba5650),
+            "rgba4444" => Some(GimReplaceFormat::Rgba4444),
+            "rgba8888" => Some(GimReplaceFormat::Rgba8888),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GimMetadata {
     pub width: usize,
@@ -149,6 +201,14 @@ impl GimImage {
     }
 
     pub fn replace_png_bytes_resized(&self, png: &[u8]) -> Result<Vec<u8>> {
+        self.replace_png_bytes_with_format(png, GimReplaceFormat::Indexed8)
+    }
+
+    pub fn replace_png_bytes_with_format(
+        &self,
+        png: &[u8],
+        format: GimReplaceFormat,
+    ) -> Result<Vec<u8>> {
         let png_decode_started = Instant::now();
         let image = image::load_from_memory(png)?.to_rgba8();
         let width = image.width() as usize;
@@ -180,9 +240,40 @@ impl GimImage {
         }
 
         let rebuild_started = Instant::now();
-        let rebuilt = rebuild_pl0a_indexed8_gim(&self.original, width, height, &pixels)?;
+        let resolved_format = match format {
+            GimReplaceFormat::Auto => GimReplaceFormat::Rgba4444,
+            other => other,
+        };
+        let rebuilt = match resolved_format {
+            GimReplaceFormat::Auto => unreachable!(),
+            GimReplaceFormat::Indexed8 => {
+                rebuild_pl0a_indexed8_gim(&self.original, width, height, &pixels)?
+            }
+            GimReplaceFormat::Rgba5650 => rebuild_pl0a_direct_color_gim(
+                &self.original,
+                width,
+                height,
+                &pixels,
+                PixelFormat::Rgba5650,
+            )?,
+            GimReplaceFormat::Rgba4444 => rebuild_pl0a_direct_color_gim(
+                &self.original,
+                width,
+                height,
+                &pixels,
+                PixelFormat::Rgba4444,
+            )?,
+            GimReplaceFormat::Rgba8888 => rebuild_pl0a_direct_color_gim(
+                &self.original,
+                width,
+                height,
+                &pixels,
+                PixelFormat::Rgba8888,
+            )?,
+        };
         eprintln!(
-            "[texture] rebuilt Indexed8 GIM replacement in {:?}",
+            "[texture] rebuilt {:?} GIM replacement in {:?}",
+            resolved_format,
             rebuild_started.elapsed()
         );
         Ok(rebuilt)
@@ -341,6 +432,127 @@ fn rebuild_pl0a_indexed8_gim(
         total_started.elapsed()
     );
 
+    Ok(out)
+}
+
+fn rebuild_pl0a_direct_color_gim(
+    original: &[u8],
+    width: usize,
+    height: usize,
+    pixels: &[[u8; 4]],
+    format: PixelFormat,
+) -> Result<Vec<u8>> {
+    let total_started = Instant::now();
+    if pixels.len() != width * height {
+        bail!(
+            "replacement pixel count {} does not match PNG dimensions {}x{}",
+            pixels.len(),
+            width,
+            height
+        );
+    }
+    if width == 0 || height == 0 || width > u16::MAX as usize || height > u16::MAX as usize {
+        bail!(
+            "PNG dimensions {}x{} are not supported by GIM u16 fields",
+            width,
+            height
+        );
+    }
+    let bpp = bits_per_pixel(format)?;
+    if format == PixelFormat::Indexed4 || format == PixelFormat::Indexed8 {
+        bail!("direct-color GIM rebuild requires an RGBA pixel format");
+    }
+    if !width.is_multiple_of(16) || !height.is_multiple_of(8) {
+        bail!(
+            "PNG dimensions {}x{} are not swizzle-safe for this GIM; width must be multiple of 16 and height multiple of 8",
+            width,
+            height
+        );
+    }
+
+    let layout = parse_pl0a_gim_layout(original)?;
+    if layout.image_info.format != PixelFormat::Indexed8
+        || !pixel_order_is_swizzled(layout.image_info.pixel_order)?
+    {
+        bail!("unsupported GIM image layout; expected swizzled Indexed8 source");
+    }
+    if layout.image_block.offset != 0x30
+        || layout.image_block.data_offset != 0x10
+        || layout.image_info.pixels_offset != layout.image_block.offset + 0x10 + 0x40
+    {
+        bail!("unsupported GIM image layout; expected pl0a-style image offsets");
+    }
+
+    let encode_started = Instant::now();
+    let mut encoded = match format {
+        PixelFormat::Rgba5650 => encode_rgba5650(pixels),
+        PixelFormat::Rgba4444 => encode_rgba4444(pixels),
+        PixelFormat::Rgba8888 => encode_rgba8888(pixels),
+        PixelFormat::Rgba5551 => encode_rgba5551(pixels),
+        PixelFormat::Indexed4 | PixelFormat::Indexed8 => unreachable!(),
+    };
+    encoded = swizzle(&encoded, width, height, bpp)?;
+    eprintln!(
+        "[texture] encoded and swizzled {:?} pixels in {:?}",
+        format,
+        encode_started.elapsed()
+    );
+
+    let image_pixel_size = encoded.len();
+    let image_data_size = 0x40 + image_pixel_size;
+    let image_block_size = 0x10 + image_data_size;
+    let block_03_size = 0x10 + image_block_size;
+    let block_02_size = 0x10 + block_03_size;
+    let file_size = 0x10 + block_02_size;
+    let mut out = vec![0u8; file_size];
+
+    out[0..0x10].copy_from_slice(&original[0..0x10]);
+
+    write_u16(&mut out, 0x10, layout.block_02.id as u16);
+    write_u16(
+        &mut out,
+        0x12,
+        ru16(original, layout.block_02.offset + 0x02)?,
+    );
+    write_u32(&mut out, 0x14, block_02_size as u32);
+    write_u32(&mut out, 0x18, block_02_size as u32);
+    write_u32(&mut out, 0x1C, layout.block_02.data_offset as u32);
+
+    write_u16(&mut out, 0x20, layout.block_03.id as u16);
+    write_u16(
+        &mut out,
+        0x22,
+        ru16(original, layout.block_03.offset + 0x02)?,
+    );
+    write_u32(&mut out, 0x24, block_03_size as u32);
+    write_u32(&mut out, 0x28, block_03_size as u32);
+    write_u32(&mut out, 0x2C, layout.block_03.data_offset as u32);
+
+    write_u16(&mut out, 0x30, layout.image_block.id as u16);
+    write_u16(
+        &mut out,
+        0x32,
+        ru16(original, layout.image_block.offset + 0x02)?,
+    );
+    write_u32(&mut out, 0x34, image_block_size as u32);
+    write_u32(&mut out, 0x38, image_block_size as u32);
+    write_u32(&mut out, 0x3C, layout.image_block.data_offset as u32);
+
+    let image_base = 0x40;
+    copy_image_header(original, &layout.image_block, &mut out, image_base)?;
+    write_u16(&mut out, image_base + 0x04, pixel_format_id(format));
+    write_u16(&mut out, image_base + 0x08, width as u16);
+    write_u16(&mut out, image_base + 0x0A, height as u16);
+    write_u16(&mut out, image_base + 0x0C, bpp as u16);
+    write_u32(&mut out, image_base + 0x20, image_data_size as u32);
+    let image_pixels_start = image_base + 0x40;
+    out[image_pixels_start..image_pixels_start + encoded.len()].copy_from_slice(&encoded);
+
+    eprintln!(
+        "[texture] assembled pl0a {:?} GIM blocks in {:?}",
+        format,
+        total_started.elapsed()
+    );
     Ok(out)
 }
 
@@ -686,6 +898,17 @@ fn pixel_format(format: u16) -> Result<PixelFormat> {
         0x04 => Ok(PixelFormat::Indexed4),
         0x05 => Ok(PixelFormat::Indexed8),
         _ => bail!("unsupported GIM pixel format 0x{format:02X}"),
+    }
+}
+
+fn pixel_format_id(format: PixelFormat) -> u16 {
+    match format {
+        PixelFormat::Rgba5650 => 0x00,
+        PixelFormat::Rgba5551 => 0x01,
+        PixelFormat::Rgba4444 => 0x02,
+        PixelFormat::Rgba8888 => 0x03,
+        PixelFormat::Indexed4 => 0x04,
+        PixelFormat::Indexed8 => 0x05,
     }
 }
 
@@ -1100,5 +1323,110 @@ mod tests {
         assert_eq!(ru16(&rebuilt, palette_offset).unwrap(), 0x05);
         assert_eq!(ru32(&rebuilt, palette_offset + 0x04).unwrap(), 0x250);
         assert_eq!(rebuilt.len(), 0x10 + block_02_size);
+    }
+
+    #[test]
+    fn resized_png_can_rebuild_pl0a_as_rgba8888_without_palette_block() {
+        let gim = make_pl0a_style_gim(16, 8);
+        let image = GimImage::decode(&gim).unwrap();
+        let rebuilt = image
+            .replace_png_bytes_with_format(&make_png(32, 16), GimReplaceFormat::Rgba8888)
+            .unwrap();
+
+        let rebuilt_image = GimImage::decode(&rebuilt).unwrap();
+        assert_eq!(rebuilt_image.metadata.width, 32);
+        assert_eq!(rebuilt_image.metadata.height, 16);
+        assert_eq!(rebuilt_image.metadata.format, PixelFormat::Rgba8888);
+        assert!(rebuilt_image.metadata.swizzled);
+        assert_eq!(rebuilt_image.rgba[0], [255, 0, 0, 255]);
+        assert_eq!(rebuilt_image.rgba[1], [0, 255, 0, 255]);
+        assert_eq!(rebuilt_image.rgba[2], [0, 0, 255, 255]);
+
+        let image_data_size = 0x40 + 32 * 16 * 4;
+        let image_block_size = 0x10 + image_data_size;
+        let block_03_size = 0x10 + image_block_size;
+        let block_02_size = 0x10 + block_03_size;
+        assert_eq!(ru32(&rebuilt, 0x14).unwrap() as usize, block_02_size);
+        assert_eq!(ru32(&rebuilt, 0x24).unwrap() as usize, block_03_size);
+        assert_eq!(ru32(&rebuilt, 0x34).unwrap() as usize, image_block_size);
+        assert_eq!(ru16(&rebuilt, 0x44).unwrap(), 0x03);
+        assert_eq!(ru16(&rebuilt, 0x48).unwrap(), 32);
+        assert_eq!(ru16(&rebuilt, 0x4A).unwrap(), 16);
+        assert_eq!(ru16(&rebuilt, 0x4C).unwrap(), 32);
+        assert_eq!(ru16(&rebuilt, 0x50).unwrap(), ru16(&gim, 0x50).unwrap());
+        assert_eq!(ru32(&rebuilt, 0x60).unwrap() as usize, image_data_size);
+        assert_eq!(rebuilt.len(), 0x10 + block_02_size);
+        assert!(find_image_info(
+            &rebuilt,
+            &find_blocks(&rebuilt, 0x10, rebuilt.len()).unwrap(),
+            0x05
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn resized_png_can_rebuild_pl0a_as_rgba4444_with_alpha() {
+        let gim = make_pl0a_style_gim(16, 8);
+        let image = GimImage::decode(&gim).unwrap();
+        let rebuilt = image
+            .replace_png_bytes_with_format(&make_png(32, 16), GimReplaceFormat::Rgba4444)
+            .unwrap();
+
+        let rebuilt_image = GimImage::decode(&rebuilt).unwrap();
+        assert_eq!(rebuilt_image.metadata.width, 32);
+        assert_eq!(rebuilt_image.metadata.height, 16);
+        assert_eq!(rebuilt_image.metadata.format, PixelFormat::Rgba4444);
+        assert!(rebuilt_image.metadata.swizzled);
+        assert_eq!(rebuilt_image.rgba[0][3], 255);
+        assert!(rebuilt_image.rgba[0][0] > 230);
+
+        let image_data_size = 0x40 + 32 * 16 * 2;
+        let image_block_size = 0x10 + image_data_size;
+        let block_03_size = 0x10 + image_block_size;
+        let block_02_size = 0x10 + block_03_size;
+        assert_eq!(ru32(&rebuilt, 0x34).unwrap() as usize, image_block_size);
+        assert_eq!(ru16(&rebuilt, 0x44).unwrap(), 0x02);
+        assert_eq!(ru16(&rebuilt, 0x4C).unwrap(), 16);
+        assert_eq!(ru16(&rebuilt, 0x50).unwrap(), ru16(&gim, 0x50).unwrap());
+        assert_eq!(ru32(&rebuilt, 0x60).unwrap() as usize, image_data_size);
+        assert_eq!(rebuilt.len(), 0x10 + block_02_size);
+    }
+
+    #[test]
+    fn resized_png_can_rebuild_pl0a_as_rgba5650() {
+        let gim = make_pl0a_style_gim(16, 8);
+        let image = GimImage::decode(&gim).unwrap();
+        let rebuilt = image
+            .replace_png_bytes_with_format(&make_png(32, 16), GimReplaceFormat::Rgba5650)
+            .unwrap();
+
+        let rebuilt_image = GimImage::decode(&rebuilt).unwrap();
+        assert_eq!(rebuilt_image.metadata.width, 32);
+        assert_eq!(rebuilt_image.metadata.height, 16);
+        assert_eq!(rebuilt_image.metadata.format, PixelFormat::Rgba5650);
+        assert!(rebuilt_image.metadata.swizzled);
+        assert_eq!(rebuilt_image.rgba[0][3], 255);
+        assert!(rebuilt_image.rgba[0][0] > 240);
+
+        let image_data_size = 0x40 + 32 * 16 * 2;
+        let image_block_size = 0x10 + image_data_size;
+        assert_eq!(ru32(&rebuilt, 0x34).unwrap() as usize, image_block_size);
+        assert_eq!(ru16(&rebuilt, 0x44).unwrap(), 0x00);
+        assert_eq!(ru32(&rebuilt, 0x60).unwrap() as usize, image_data_size);
+    }
+
+    #[test]
+    fn auto_rebuilds_pl0a_indexed8_as_rgba4444() {
+        let gim = make_pl0a_style_gim(16, 8);
+        let image = GimImage::decode(&gim).unwrap();
+        let rebuilt = image
+            .replace_png_bytes_with_format(&make_png(32, 16), GimReplaceFormat::Auto)
+            .unwrap();
+
+        let rebuilt_image = GimImage::decode(&rebuilt).unwrap();
+        assert_eq!(rebuilt_image.metadata.format, PixelFormat::Rgba4444);
+        assert_eq!(rebuilt_image.metadata.width, 32);
+        assert_eq!(rebuilt_image.metadata.height, 16);
     }
 }

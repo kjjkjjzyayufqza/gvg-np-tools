@@ -2,7 +2,7 @@ use super::gim_preview_cache::{gim_data_identity, GimPreviewCache, GimPreviewCac
 use crate::{
     pmf2, pzz,
     save::{rebuild_pzz_payload, rebuild_pzz_payload_cached, PzzSavePlan, PzzSavePlanner},
-    texture::GimImage,
+    texture::{GimImage, GimReplaceFormat},
     workspace::{EntryValidation, ModWorkspace},
 };
 use anyhow::Result;
@@ -25,9 +25,11 @@ fn cwcheat_ini_dialog_base_dir(
     last_dir: &Option<PathBuf>,
     current_file: &Option<PathBuf>,
 ) -> Option<PathBuf> {
-    last_dir
-        .clone()
-        .or_else(|| current_file.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())))
+    last_dir.clone().or_else(|| {
+        current_file
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    })
 }
 
 /// Pick an existing `.ini` for CW cheat (Open / settings).
@@ -171,6 +173,7 @@ pub fn show_editor_windows(
     last_dir_replace_stream_png: &mut Option<PathBuf>,
     last_dir_cwcheat: &mut Option<PathBuf>,
     cwcheat_file_path: &mut Option<PathBuf>,
+    gim_replace_format: GimReplaceFormat,
 ) -> EditorAction {
     let mut action = EditorAction::none();
 
@@ -224,6 +227,7 @@ pub fn show_editor_windows(
                     &mut editors.gim_preview_cache,
                     last_dir_export_stream_png,
                     last_dir_replace_stream_png,
+                    gim_replace_format,
                 ) {
                     action.accumulate_from(result);
                 }
@@ -463,6 +467,7 @@ fn show_gim_preview_editor(
     cache: &mut GimPreviewCache,
     last_dir_export_stream_png: &mut Option<PathBuf>,
     last_dir_replace_stream_png: &mut Option<PathBuf>,
+    gim_replace_format: GimReplaceFormat,
 ) -> Option<EditorAction> {
     let stream = workspace.open_pzz().and_then(|pzz| {
         pzz.stream_data()
@@ -530,6 +535,7 @@ fn show_gim_preview_editor(
             workspace,
             stream_index,
             last_dir_replace_stream_png,
+            gim_replace_format,
         ));
     }
 
@@ -567,6 +573,7 @@ fn replace_gim_png(
     workspace: &mut ModWorkspace,
     stream_index: usize,
     last_dir: &mut Option<PathBuf>,
+    gim_replace_format: GimReplaceFormat,
 ) -> EditorAction {
     let mut dialog = rfd::FileDialog::new().add_filter("PNG", &["png"]);
     if let Some(dir) = last_dir.clone() {
@@ -595,7 +602,7 @@ fn replace_gim_png(
         png_read_started.elapsed()
     );
     let replace_started = Instant::now();
-    let replaced = match image.replace_png_bytes(&png_data) {
+    let replaced = match image.replace_png_bytes_with_format(&png_data, gim_replace_format) {
         Ok(d) => d,
         Err(e) => {
             return EditorAction {

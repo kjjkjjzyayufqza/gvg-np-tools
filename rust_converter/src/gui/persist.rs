@@ -40,6 +40,8 @@ pub struct PersistedGuiState {
     #[serde(default)]
     pub last_dir_replace_stream_png: Option<PathBuf>,
     #[serde(default)]
+    pub gim_replace_format: Option<String>,
+    #[serde(default)]
     pub recent_afs_paths: Vec<PathBuf>,
 }
 

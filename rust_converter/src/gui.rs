@@ -13,6 +13,7 @@ use crate::{
     pmf2, pzz,
     render::PreviewState,
     save::rebuild_pzz_payload_cached,
+    texture::GimReplaceFormat,
     workspace::{ModWorkspace, PzzWorkspace},
 };
 use anyhow::Result;
@@ -74,6 +75,7 @@ pub struct GvgModdingApp {
     last_dir_replace_stream_pmf2: Option<std::path::PathBuf>,
     last_dir_export_stream_png: Option<std::path::PathBuf>,
     last_dir_replace_stream_png: Option<std::path::PathBuf>,
+    gim_replace_format: GimReplaceFormat,
     /// Persisted CW cheat INI path; also drives the CWCheat Editor buffer reload.
     cwcheat_file_path: Option<std::path::PathBuf>,
     auto_update_cwcheat_on_save_afs: bool,
@@ -136,7 +138,8 @@ impl GvgModdingApp {
 
         let monitor_size = ctx.input(|i| i.viewport().monitor_size);
         let Some(mon) = monitor_size else {
-            self.initial_window_fit_miss_frames = self.initial_window_fit_miss_frames.saturating_add(1);
+            self.initial_window_fit_miss_frames =
+                self.initial_window_fit_miss_frames.saturating_add(1);
             if self.initial_window_fit_miss_frames > 120 {
                 self.needs_initial_window_fit = false;
             }
@@ -199,6 +202,11 @@ impl GvgModdingApp {
             last_dir_replace_stream_pmf2: persisted.last_dir_replace_stream_pmf2,
             last_dir_export_stream_png: persisted.last_dir_export_stream_png,
             last_dir_replace_stream_png: persisted.last_dir_replace_stream_png,
+            gim_replace_format: persisted
+                .gim_replace_format
+                .as_deref()
+                .and_then(GimReplaceFormat::from_key)
+                .unwrap_or(GimReplaceFormat::Auto),
             cwcheat_file_path: persisted.cwcheat_file_path.clone(),
             auto_update_cwcheat_on_save_afs: persisted.auto_update_cwcheat_on_save_afs,
             cwcheat_settings_modal_open: false,
@@ -274,6 +282,7 @@ impl eframe::App for GvgModdingApp {
             &mut self.last_dir_replace_stream_png,
             &mut self.last_dir_cwcheat,
             &mut self.cwcheat_file_path,
+            self.gim_replace_format,
         );
         self.gui_state_dirty |= editor_result.dirs_changed;
         if editor_result.preview_changed {
@@ -357,11 +366,7 @@ impl GvgModdingApp {
         if !self.auto_update_cwcheat_on_save_afs {
             return;
         }
-        let Some(path) = self
-            .cwcheat_file_path
-            .as_ref()
-            .filter(|p| p.exists())
-        else {
+        let Some(path) = self.cwcheat_file_path.as_ref().filter(|p| p.exists()) else {
             return;
         };
         let Ok(current_text) = std::fs::read_to_string(path) else {
@@ -394,7 +399,8 @@ impl GvgModdingApp {
                 ));
             }
             Err(e) => {
-                self.workspace.push_log(format!("CW cheat auto-update skipped: {e}"));
+                self.workspace
+                    .push_log(format!("CW cheat auto-update skipped: {e}"));
             }
         }
     }
@@ -522,6 +528,7 @@ impl GvgModdingApp {
             last_dir_replace_stream_pmf2: self.last_dir_replace_stream_pmf2.clone(),
             last_dir_export_stream_png: self.last_dir_export_stream_png.clone(),
             last_dir_replace_stream_png: self.last_dir_replace_stream_png.clone(),
+            gim_replace_format: Some(self.gim_replace_format.key().to_string()),
             cwcheat_file_path: self.cwcheat_file_path.clone(),
             auto_update_cwcheat_on_save_afs: self.auto_update_cwcheat_on_save_afs,
             recent_afs_paths: self.recent_afs_paths.clone(),
@@ -618,6 +625,25 @@ impl GvgModdingApp {
                     ui.close();
                 }
             });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label("GIM Replace:");
+            let old_format = self.gim_replace_format;
+            egui::ComboBox::from_id_salt("gim_replace_format")
+                .selected_text(self.gim_replace_format.label())
+                .show_ui(ui, |ui| {
+                    for format in GimReplaceFormat::all() {
+                        ui.selectable_value(&mut self.gim_replace_format, *format, format.label());
+                    }
+                });
+            if self.gim_replace_format != old_format {
+                self.mark_gui_state_dirty();
+                self.status = format!(
+                    "GIM PNG replace format: {}",
+                    self.gim_replace_format.label()
+                );
+            }
 
             ui.add_space(6.0);
             if ui
@@ -1143,7 +1169,8 @@ impl GvgModdingApp {
             png_read_started.elapsed()
         );
         let replace_started = Instant::now();
-        let replaced = match image.replace_png_bytes_resized(&png_data) {
+        let replaced = match image.replace_png_bytes_with_format(&png_data, self.gim_replace_format)
+        {
             Ok(d) => d,
             Err(e) => {
                 self.notify_error(format!("GIM replace failed: {e}"));
