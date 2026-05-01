@@ -12,6 +12,8 @@ Run the checklist against these outputs:
 - `add_multi_pcube1_bind_m07out`
 - `add_pcube1_bind_m11out`
 
+Also use `testout.dae -> test.pmf2` when validating special-section behavior such as `pl0a_o05`.
+
 ## Before Testing
 
 - [ ] Build or run the latest converter binary from the current workspace.
@@ -19,6 +21,7 @@ Run the checklist against these outputs:
 - [ ] Keep a known-good original `Z_DATA.BIN` or source PZZ available for comparison.
 - [ ] Use a clean emulator/game boot for each in-game test when possible.
 - [ ] Record converter console output, especially `[patch-mesh]` warnings.
+- [ ] If the output is repacked into a PZZ, record any compressed chunk warning such as `compressed size exceeds original chunk`.
 
 ## Common Converter Checks
 
@@ -55,6 +58,7 @@ For each sample in game:
 - [ ] Verify existing model parts still render.
 - [ ] Verify animations still run.
 - [ ] Compare against the preview result and record any mismatch.
+- [ ] If the game hangs during loading, check both PMF2 section renderability and PZZ/AFS repack size warnings before assuming the preview is wrong.
 
 ## Sample Matrix
 
@@ -115,12 +119,25 @@ Purpose: another renderable-bone positive control.
 - [ ] Existing model geometry remains intact.
 - [ ] No unexpected material or texture regression appears on nearby parts.
 
+### `testout.dae -> test.pmf2`
+
+Purpose: special-section regression for `pl0a_o05` and PZZ size risk.
+
+- [ ] Confirm the input DAE targets `pl0a_o05` or another non-standard ornament/effect section.
+- [ ] Preview may show the appended mesh; do not treat preview visibility as proof that the game will render it.
+- [ ] Check the target section against `PMF2_SPECIAL_SECTIONS_ANALYSIS.md`.
+- [ ] For `pl0a_o05`, expected risk: `word_8A17F10[24] == 0x0000`, so it is not drawn/traversed by the same main render path as `m01`, `m07`, or `m11`.
+- [ ] Confirm the generated PMF2 keeps section offsets valid and reaches `RET`/`END` in display-list scans.
+- [ ] When repacking to PZZ, record whether stream 0 compressed size exceeds the original chunk.
+- [ ] If the game infinitely loads or hangs, test the same added mesh remapped to a known drawable section before debugging PMF2 display-list bytes further.
+
 ## Pass Criteria
 
 The regression pass is acceptable when:
 
 - [ ] All non-`m00` samples that preview correctly also render in game.
 - [ ] `m00` samples emit a warning and remain non-rendering in game unless `PMF2_M00_RENDER_ANALYSIS.md` is updated with new evidence.
+- [ ] Special sections documented in `PMF2_SPECIAL_SECTIONS_ANALYSIS.md` are not counted as normal renderable targets unless their game path is separately proven.
 - [ ] `add_multi_pcube1_bind_m07out` no longer renders black when borrowing a valid native textured display-list state.
 - [ ] Large mesh output does not exceed PSP GE `PRIM` vertex limits.
 - [ ] Existing model geometry and textures are preserved.
@@ -138,4 +155,4 @@ For each failure, record:
 - Expected result:
 - Output PMF2/PZZ path:
 - Screenshot or video path:
-- Suspected area: DAE import / mesh binding / GE commands / material index / save-repack / `m00` policy
+- Suspected area: DAE import / mesh binding / GE commands / material index / save-repack / runtime draw-mask policy

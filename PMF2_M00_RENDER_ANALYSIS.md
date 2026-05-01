@@ -4,6 +4,8 @@
 
 `m00` is not failing because its generated PMF2 mesh bytes are malformed. The generated `m00` section can contain valid mesh metadata and a valid GE display list, but the game runtime treats section index `0` as a root/control section that traverses children without enqueueing its own draw.
 
+This is one instance of a broader runtime section policy. See `PMF2_SPECIAL_SECTIONS_ANALYSIS.md` for the draw-mask table notes, including the later `pl0a_o05` finding.
+
 Practical result:
 
 - Meshes bound to `m00` can appear correctly in the converter preview.

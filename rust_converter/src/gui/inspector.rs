@@ -88,11 +88,95 @@ fn show_pmf2_summary(ui: &mut egui::Ui, data: &[u8]) {
     let mesh_count = sections.iter().filter(|s| s.has_mesh).count();
     labeled_row(ui, "Bones with mesh", &format!("{}", mesh_count));
 
+    let drawable_count = sections
+        .iter()
+        .filter(|section| pmf2::section_render_policy(section.index).draws)
+        .count();
+    let safe_mesh_target_count = sections
+        .iter()
+        .filter(|section| pmf2::section_render_policy(section.index).safe_mesh_target)
+        .count();
+    let special_count = sections
+        .iter()
+        .filter(|section| !pmf2::section_render_policy(section.index).safe_mesh_target)
+        .count();
+    labeled_row(
+        ui,
+        "Runtime drawable sections",
+        &format!("{}", drawable_count),
+    );
+    labeled_row(
+        ui,
+        "Safe mesh targets",
+        &format!(
+            "{} safe, {} special/unsafe",
+            safe_mesh_target_count, special_count
+        ),
+    );
+
     let (meshes, _, _, _) = pmf2::extract_per_bone_meshes(data, false);
     let total_verts: usize = meshes.iter().map(|m| m.vertices.len()).sum();
     let total_faces: usize = meshes.iter().map(|m| m.faces.len()).sum();
     labeled_row(ui, "Total vertices", &format!("{}", total_verts));
     labeled_row(ui, "Total faces", &format!("{}", total_faces));
+
+    ui.separator();
+    ui.strong("Runtime Render Policy");
+    ui.label("IDA-derived main render mask: draw bit means the game enqueues this section's display list. Preview can still show unsafe sections.");
+    egui::ScrollArea::vertical()
+        .max_height(360.0)
+        .show(ui, |ui| {
+            egui::Grid::new("pmf2_runtime_render_policy_grid")
+                .striped(true)
+                .num_columns(9)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong("#");
+                    ui.strong("Name");
+                    ui.strong("Kind");
+                    ui.strong("Parent");
+                    ui.strong("Mesh");
+                    ui.strong("Mask");
+                    ui.strong("Draw");
+                    ui.strong("Traverse");
+                    ui.strong("Import target");
+                    ui.end_row();
+
+                    for section in &sections {
+                        let policy = pmf2::section_render_policy(section.index);
+                        ui.monospace(format!("{:02}", section.index));
+                        ui.monospace(&section.name);
+                        ui.monospace(if section.category.is_empty() {
+                            "-"
+                        } else {
+                            &section.category
+                        });
+                        ui.monospace(format!("{}", section.parent));
+                        ui.monospace(if section.has_mesh { "yes" } else { "no" });
+                        ui.monospace(
+                            policy
+                                .flags
+                                .map(|flags| format!("0x{flags:04X}"))
+                                .unwrap_or_else(|| "unknown".to_string()),
+                        );
+                        ui.monospace(if policy.draws { "yes" } else { "no" });
+                        ui.monospace(if policy.traverses { "yes" } else { "no" });
+                        let target_text = if policy.safe_mesh_target {
+                            "safe"
+                        } else if policy.flags.is_none() {
+                            "unknown"
+                        } else {
+                            "unsafe"
+                        };
+                        if policy.safe_mesh_target {
+                            ui.monospace(target_text);
+                        } else {
+                            ui.colored_label(egui::Color32::YELLOW, target_text);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
 }
 
 fn show_gim_summary(ui: &mut egui::Ui, data: &[u8]) {

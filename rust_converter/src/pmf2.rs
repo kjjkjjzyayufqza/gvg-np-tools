@@ -62,6 +62,57 @@ const PRIM_TRIANGLE_FAN: u8 = 5;
 const SECTION_MESH_FLAG_OFFSET: usize = 0x70;
 const SECTION_MATERIAL_INDEX_OFFSET: usize = 0x74;
 
+const SECTION_RENDER_MASKS: [u16; 57] = [
+    0x0002, // 00: root/control, traverse only
+    0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003,
+    0x0003, // 01..13: draw + traverse
+    0x0002, 0x0002, 0x0002, 0x0002, // 14..17: traverse only
+    0x0003, // 18: draw + traverse
+    0x0002, 0x0002, 0x0002, // 19..21: traverse only
+    0x0003, // 22: draw + traverse
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, // 23..31
+    0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003, 0x0003,
+    0x0003, // 32..42: draw + traverse
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x0000, // 43..56
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SectionRenderPolicy {
+    pub flags: Option<u16>,
+    pub draws: bool,
+    pub traverses: bool,
+    pub safe_mesh_target: bool,
+    pub label: &'static str,
+}
+
+pub fn section_render_policy(index: usize) -> SectionRenderPolicy {
+    let Some(flags) = SECTION_RENDER_MASKS.get(index).copied() else {
+        return SectionRenderPolicy {
+            flags: None,
+            draws: false,
+            traverses: false,
+            safe_mesh_target: false,
+            label: "unknown",
+        };
+    };
+    let draws = flags & 1 != 0;
+    let traverses = flags & 2 != 0;
+    let label = match (draws, traverses) {
+        (true, true) => "draw + traverse",
+        (true, false) => "draw only",
+        (false, true) => "traverse only",
+        (false, false) => "not main-rendered",
+    };
+    SectionRenderPolicy {
+        flags: Some(flags),
+        draws,
+        traverses,
+        safe_mesh_target: draws,
+        label,
+    }
+}
+
 fn is_probable_control_root_section(section: &BoneSection) -> bool {
     if section.parent >= 0 {
         return false;
@@ -2247,6 +2298,31 @@ mod tests {
         section.parent = -1;
         section.name = "pl0a_m01".to_string();
         assert!(!is_probable_control_root_section(&section));
+    }
+
+    #[test]
+    fn section_render_policy_matches_known_ida_draw_mask_entries() {
+        let m00 = section_render_policy(0);
+        assert_eq!(m00.flags, Some(0x0002));
+        assert!(!m00.draws);
+        assert!(m00.traverses);
+        assert!(!m00.safe_mesh_target);
+
+        for index in [1usize, 7, 11] {
+            let policy = section_render_policy(index);
+            assert_eq!(policy.flags, Some(0x0003));
+            assert!(policy.draws);
+            assert!(policy.traverses);
+            assert!(policy.safe_mesh_target);
+        }
+
+        let o05 = section_render_policy(24);
+        assert_eq!(o05.flags, Some(0x0000));
+        assert!(!o05.draws);
+        assert!(!o05.traverses);
+        assert!(!o05.safe_mesh_target);
+
+        assert_eq!(section_render_policy(57).flags, None);
     }
 
     #[test]
