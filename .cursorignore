@@ -1,0 +1,20 @@
+# Reduce Cursor index / agent scans; align with heavy paths in .gitignore
+# node_modules and target are huge locally but omit from root .gitignore
+**/node_modules/
+**/target/
+
+*.BIN
+_ppsspp_src/
+ppsspp_dump/
+pzz_harvest_out/
+pzz_mesh_recon_out/
+test/
+__pycache__/
+*.pyc
+converted_out/
+data_bin_inventory/
+pipeline_out/
+pipeline_out_rs/
+debug/
+**/*.rs.bk
+*.pdb

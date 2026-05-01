@@ -720,6 +720,14 @@ struct ControllerData {
     geometry_id: String,
     joint_names: Vec<String>,
     dominant_joint_name: Option<String>,
+    bind_shape_matrix: [f32; 16],
+}
+
+#[derive(Clone)]
+struct MeshBinding {
+    geometry_id: String,
+    bone_index: usize,
+    bind_shape_matrix: Option<[f32; 16]>,
 }
 
 pub fn read_dae_to_meta(path: &Path, model_name: Option<&str>) -> Result<Pmf2Meta> {
@@ -799,7 +807,9 @@ fn parse_dae_to_meta_text(xml: &str, model_name: &str) -> Result<Pmf2Meta> {
         sections.iter().map(|s| (s.index, s.name.clone())).collect();
 
     let mut mesh_by_bone: BTreeMap<usize, BoneMeshMeta> = BTreeMap::new();
-    for (geom_id, mut bone_index) in bindings {
+    for binding in bindings {
+        let geom_id = binding.geometry_id;
+        let mut bone_index = binding.bone_index;
         if !section_names.contains_key(&bone_index) {
             bone_index = 0;
         }
@@ -816,9 +826,21 @@ fn parse_dae_to_meta_text(xml: &str, model_name: &str) -> Result<Pmf2Meta> {
             .unwrap_or(IDENTITY_F32);
         let mut local_vertices = Vec::with_capacity(geom.vertices.len());
         for v in &geom.vertices {
-            let (wx, wy, wz) = dae_to_game_position(v[0], v[1], v[2]);
+            let collada_position = if let Some(bind_matrix) = &binding.bind_shape_matrix {
+                transform_point_f32(bind_matrix, v[0], v[1], v[2])
+            } else {
+                (v[0], v[1], v[2])
+            };
+            let (wx, wy, wz) =
+                dae_to_game_position(collada_position.0, collada_position.1, collada_position.2);
             let (lx, ly, lz) = transform_point_f32(&inv_world, wx, wy, wz);
-            let (wnx, wny, wnz) = dae_to_game_direction(v[5], v[6], v[7]);
+            let collada_normal = if let Some(bind_matrix) = &binding.bind_shape_matrix {
+                normalize3(transform_direction_f32(bind_matrix, v[5], v[6], v[7]))
+            } else {
+                (v[5], v[6], v[7])
+            };
+            let (wnx, wny, wnz) =
+                dae_to_game_direction(collada_normal.0, collada_normal.1, collada_normal.2);
             let (lnx, lny, lnz) = normalize3(transform_direction_f32(&inv_world, wnx, wny, wnz));
             local_vertices.push([lx, ly, lz, v[3], collada_v_to_pmf2(v[4]), lnx, lny, lnz]);
         }
@@ -1127,6 +1149,11 @@ fn parse_controllers(doc: &Document<'_>) -> HashMap<String, ControllerData> {
             .and_then(|id| sources.get(id).copied())
             .map(read_name_array)
             .unwrap_or_default();
+        let bind_shape_matrix = skin
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "bind_shape_matrix")
+            .and_then(read_matrix_node)
+            .unwrap_or(IDENTITY_F32);
         let dominant_joint_name = detect_dominant_joint_name(skin, &sources, &joint_names);
         out.insert(
             controller_id.to_string(),
@@ -1134,10 +1161,19 @@ fn parse_controllers(doc: &Document<'_>) -> HashMap<String, ControllerData> {
                 geometry_id,
                 joint_names,
                 dominant_joint_name,
+                bind_shape_matrix,
             },
         );
     }
     out
+}
+
+fn read_matrix_node(matrix_node: Node<'_, '_>) -> Option<[f32; 16]> {
+    let values = parse_f32_list(matrix_node.text().unwrap_or(""));
+    if values.len() < 16 {
+        return None;
+    }
+    Some(col_major_to_row_major_f32(&values[..16]))
 }
 
 fn read_name_array(source_node: Node<'_, '_>) -> Vec<String> {
@@ -1393,7 +1429,7 @@ fn collect_mesh_bindings(
     joint_lookup: &HashMap<String, usize>,
     sections: &[BoneSection],
     geometries: &BTreeMap<String, GeometryData>,
-) -> Vec<(String, usize)> {
+) -> Vec<MeshBinding> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for node in visual_scene
@@ -1455,7 +1491,11 @@ fn collect_mesh_bindings(
                 .unwrap_or(0);
             let key = (controller.geometry_id.clone(), bone_index);
             if seen.insert(key.clone()) {
-                out.push(key);
+                out.push(MeshBinding {
+                    geometry_id: controller.geometry_id.clone(),
+                    bone_index,
+                    bind_shape_matrix: controller_bind_shape_matrix(controller),
+                });
             }
         }
         for instance_geometry in node
@@ -1476,17 +1516,29 @@ fn collect_mesh_bindings(
                 .unwrap_or(0);
             let key = (geometry_id, bone_index);
             if seen.insert(key.clone()) {
-                out.push(key);
+                out.push(MeshBinding {
+                    geometry_id: key.0,
+                    bone_index: key.1,
+                    bind_shape_matrix: None,
+                });
             }
         }
     }
     if out.is_empty() {
         for geom in geometries.values() {
             let bone_index = match_bone_from_name(&geom.name, sections).unwrap_or(0);
-            out.push((geom.id.clone(), bone_index));
+            out.push(MeshBinding {
+                geometry_id: geom.id.clone(),
+                bone_index,
+                bind_shape_matrix: None,
+            });
         }
     }
     out
+}
+
+fn controller_bind_shape_matrix(controller: &ControllerData) -> Option<[f32; 16]> {
+    (controller.bind_shape_matrix != IDENTITY_F32).then_some(controller.bind_shape_matrix)
 }
 
 fn resolve_bone_index(name: &str, joint_lookup: &HashMap<String, usize>) -> Option<usize> {
@@ -1987,6 +2039,74 @@ mod tests {
         let meta = parse_dae_to_meta_text(xml, "weights_test").unwrap();
         assert_eq!(meta.bone_meshes.len(), 1);
         assert_eq!(meta.bone_meshes[0].bone_index, 1);
+    }
+
+    #[test]
+    fn dae_import_applies_bind_shape_matrix_without_double_applying_inverse_bind() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <library_geometries>
+    <geometry id="geom0" name="geom0">
+      <mesh>
+        <source id="geom0-positions">
+          <float_array id="geom0-positions-array" count="9">1 0 0 2 0 0 3 0 0</float_array>
+          <technique_common><accessor source="#geom0-positions-array" count="3" stride="3"/></technique_common>
+        </source>
+        <vertices id="geom0-vertices">
+          <input semantic="POSITION" source="#geom0-positions"/>
+        </vertices>
+        <triangles count="1">
+          <input semantic="VERTEX" source="#geom0-vertices" offset="0"/>
+          <p>0 1 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_controllers>
+    <controller id="ctrl0">
+      <skin source="#geom0">
+        <bind_shape_matrix>3 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</bind_shape_matrix>
+        <source id="ctrl0-joints">
+          <Name_array id="ctrl0-joints-array" count="1">arm</Name_array>
+          <technique_common><accessor source="#ctrl0-joints-array" count="1" stride="1"/></technique_common>
+        </source>
+        <source id="ctrl0-bind">
+          <float_array id="ctrl0-bind-array" count="16">2 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</float_array>
+          <technique_common><accessor source="#ctrl0-bind-array" count="1" stride="16"/></technique_common>
+        </source>
+        <source id="ctrl0-weights">
+          <float_array id="ctrl0-weights-array" count="1">1</float_array>
+          <technique_common><accessor source="#ctrl0-weights-array" count="1" stride="1"/></technique_common>
+        </source>
+        <joints>
+          <input semantic="JOINT" source="#ctrl0-joints"/>
+          <input semantic="INV_BIND_MATRIX" source="#ctrl0-bind"/>
+        </joints>
+        <vertex_weights count="3">
+          <input semantic="JOINT" source="#ctrl0-joints" offset="0"/>
+          <input semantic="WEIGHT" source="#ctrl0-weights" offset="1"/>
+          <vcount>1 1 1</vcount>
+          <v>0 0 0 0 0 0</v>
+        </vertex_weights>
+      </skin>
+    </controller>
+  </library_controllers>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="mesh0" name="mesh0">
+        <instance_controller url="#ctrl0"/>
+      </node>
+      <node id="joint_0_arm" name="arm" type="JOINT">
+        <matrix>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>"##;
+
+        let meta = parse_dae_to_meta_text(xml, "bind_matrix_test").unwrap();
+        assert_eq!(meta.bone_meshes.len(), 1);
+        assert!((meta.bone_meshes[0].local_vertices[0][0] - 3.0).abs() < 1e-6);
     }
 
     #[test]

@@ -62,6 +62,14 @@ const PRIM_TRIANGLE_FAN: u8 = 5;
 const SECTION_MESH_FLAG_OFFSET: usize = 0x70;
 const SECTION_MATERIAL_INDEX_OFFSET: usize = 0x74;
 
+fn is_probable_control_root_section(section: &BoneSection) -> bool {
+    if section.parent >= 0 {
+        return false;
+    }
+    let name = section.name.to_ascii_lowercase();
+    name == "m00" || name.ends_with("_m00")
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct VtypeInfo {
     pub raw: u32,
@@ -1271,6 +1279,7 @@ fn append_mesh_draw_to_template_section(
     }
 
     let mut ret_rel = None;
+    let mut insert_rel = None;
     let mut off = origin_rel;
     while off + 4 <= template_section.len() {
         let word = ru32(template_section, off);
@@ -1279,9 +1288,13 @@ fn append_mesh_draw_to_template_section(
             ret_rel = Some(off);
             break;
         }
+        if cmd == GE_CMD_PRIM {
+            insert_rel = Some(off + 4);
+        }
         off += 4;
     }
     let ret_rel = ret_rel?;
+    let insert_rel = insert_rel.unwrap_or(ret_rel);
 
     let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
         let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
@@ -1317,7 +1330,7 @@ fn append_mesh_draw_to_template_section(
         addr_off += 4;
     }
 
-    out.splice(ret_rel..ret_rel, inserted_cmds);
+    out.splice(insert_rel..insert_rel, inserted_cmds);
     let extra_vaddr = out.len().checked_sub(origin_rel)?;
     let vertex_size = VtypeInfo::decode(vtype).vertex_size();
     for (chunk_idx, (start, _)) in chunks.iter().enumerate() {
@@ -1326,7 +1339,7 @@ fn append_mesh_draw_to_template_section(
             return None;
         }
         let patched_vaddr = ((GE_CMD_VADDR as u32) << 24) | chunk_vaddr as u32;
-        let vaddr_pos = ret_rel + chunk_idx * 16;
+        let vaddr_pos = insert_rel + chunk_idx * 16;
         out[vaddr_pos..vaddr_pos + 4].copy_from_slice(&patched_vaddr.to_le_bytes());
     }
     out.extend_from_slice(&vert_buf);
@@ -1628,6 +1641,12 @@ pub fn patch_pmf2_with_mesh_updates(
         let dae_face_count = src_mesh.map(|m| m.faces.len()).unwrap_or(0);
         let template_had_mesh = tsec.has_mesh && orig_faces > 0;
         let template_section = &template_pmf2[sec_start..sec_end];
+        if is_probable_control_root_section(tsec) && dae_face_count > orig_faces {
+            eprintln!(
+                "  [patch-mesh] WARNING: {} looks like a root/control m00 section; game runtime may skip meshes bound here",
+                tsec.name
+            );
+        }
         let preserved_section = if bbox_changed {
             tsec.origin_offset.and_then(|origin| {
                 let origin_rel = origin.checked_sub(sec_start)?;
@@ -1696,6 +1715,17 @@ pub fn patch_pmf2_with_mesh_updates(
                 } else if sec_end > header_end {
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                 }
+            } else if template_had_mesh && dae_face_count < orig_faces {
+                if let Some(mut section) = preserved_section {
+                    section[..0x100].copy_from_slice(&header[..0x100]);
+                    sec_buf = section;
+                } else if sec_end > header_end {
+                    sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
+                }
+                eprintln!(
+                    "  [patch-mesh] preserved {} template mesh: source has fewer faces ({} < {})",
+                    tsec.name, dae_face_count, orig_faces
+                );
             } else if dae_face_count != orig_faces {
                 let filtered_mesh = if !template_had_mesh {
                     source_world_mats.get(&mesh.bone_index).and_then(|world| {
@@ -1966,6 +1996,55 @@ mod tests {
     }
 
     #[test]
+    fn append_inserts_generated_draw_before_post_prim_state_cleanup() {
+        let mesh = test_mesh("root", 1);
+        let (_, vert_buf, vertex_count) = encode_mesh_vertices(&mesh, &[2.0, 2.0, 2.0]).unwrap();
+        let mut section = vec![0u8; 0x100];
+        let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
+            let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
+            buf.extend_from_slice(&word.to_le_bytes());
+        };
+
+        let origin_rel = section.len();
+        let vaddr = 8 * 4;
+        push_cmd(&mut section, GE_CMD_ORIGIN, 0);
+        push_cmd(&mut section, GE_CMD_BASE, 0);
+        push_cmd(&mut section, GE_CMD_VADDR, vaddr);
+        push_cmd(&mut section, GE_CMD_VERTEXTYPE, (2 << 7) | (2 << 5) | 2);
+        push_cmd(&mut section, 0x9B, 1);
+        push_cmd(
+            &mut section,
+            GE_CMD_PRIM,
+            (PRIM_TRIANGLES as u32) << 16 | vertex_count as u32,
+        );
+        push_cmd(&mut section, GE_CMD_VERTEXTYPE, 0);
+        push_cmd(&mut section, GE_CMD_RET, 0);
+        section.extend_from_slice(&vert_buf);
+
+        let extra = test_mesh("root", 2);
+        let extra = build_mesh_suffix(&extra, 1).unwrap();
+        let patched =
+            append_mesh_draw_to_template_section(&section, origin_rel, &extra, &[2.0, 2.0, 2.0])
+                .unwrap();
+        let words = patched
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect::<Vec<_>>();
+        let prim_positions = words
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, word)| (((word >> 24) & 0xFF) as u8 == GE_CMD_PRIM).then_some(idx))
+            .collect::<Vec<_>>();
+        let cleanup_pos = words
+            .iter()
+            .position(|word| *word == ((GE_CMD_VERTEXTYPE as u32) << 24))
+            .unwrap();
+
+        assert_eq!(prim_positions.len(), 2);
+        assert!(prim_positions[1] < cleanup_pos);
+    }
+
+    #[test]
     fn patch_append_filters_faces_that_already_exist_in_template() {
         let template_pmf2 = template_with_custom_mesh_command();
         let mut source_mesh = test_mesh("root", 2);
@@ -1991,6 +2070,100 @@ mod tests {
                 category: String::new(),
             }],
             bone_meshes: vec![source_mesh],
+        };
+
+        let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
+        let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
+        assert_eq!(meshes[0].faces.len(), 2);
+    }
+
+    #[test]
+    fn patch_preserves_template_section_when_face_filter_finds_no_new_faces() {
+        let template_pmf2 = template_with_custom_mesh_command();
+        let mut source_mesh = test_mesh("root", 2);
+        source_mesh.faces = vec![
+            source_mesh.faces[0],
+            source_mesh.faces[0],
+            source_mesh.faces[0],
+        ];
+        source_mesh.face_count = source_mesh.faces.len();
+        let source_meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [2.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![source_mesh],
+        };
+
+        let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
+        let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
+        assert_eq!(meshes[0].faces.len(), 1);
+    }
+
+    #[test]
+    fn patch_mesh_updates_are_idempotent_when_reapplied_to_output() {
+        let template_pmf2 = template_with_custom_mesh_command();
+        let source_meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [2.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![test_mesh("root", 2)],
+        };
+
+        let first = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
+        let second = patch_pmf2_with_mesh_updates(&first, &source_meta, 0.0).unwrap();
+        let (first_meshes, _, _, _) = extract_per_bone_meshes(&first, false);
+        let (second_meshes, _, _, _) = extract_per_bone_meshes(&second, false);
+
+        assert_eq!(first_meshes[0].faces.len(), 2);
+        assert_eq!(second_meshes[0].faces.len(), 2);
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn patch_mesh_preserves_existing_section_when_source_has_fewer_faces() {
+        let template_meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [2.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![test_mesh("root", 2)],
+        };
+        let template_pmf2 = rebuild_pmf2(&template_meta);
+        let source_meta = Pmf2Meta {
+            bone_meshes: vec![test_mesh("root", 1)],
+            ..template_meta
         };
 
         let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
@@ -2052,6 +2225,28 @@ mod tests {
             ru32(&patched, patched_sec_off + SECTION_MATERIAL_INDEX_OFFSET),
             0
         );
+    }
+
+    #[test]
+    fn probable_control_root_section_only_flags_root_m00() {
+        let mut section = BoneSection {
+            index: 0,
+            name: "pl0a_m00".to_string(),
+            offset: 0,
+            size: 0,
+            local_matrix: identity(),
+            parent: -1,
+            has_mesh: false,
+            origin_offset: None,
+            category: String::new(),
+        };
+
+        assert!(is_probable_control_root_section(&section));
+        section.parent = 1;
+        assert!(!is_probable_control_root_section(&section));
+        section.parent = -1;
+        section.name = "pl0a_m01".to_string();
+        assert!(!is_probable_control_root_section(&section));
     }
 
     #[test]
