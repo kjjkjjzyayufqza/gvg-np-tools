@@ -1425,7 +1425,12 @@ fn collect_mesh_bindings(
             let mut bone_index = controller
                 .dominant_joint_name
                 .as_deref()
-                .and_then(|name| resolve_bone_index(name, joint_lookup));
+                .and_then(|name| resolve_bone_index(name, joint_lookup))
+                .or_else(|| {
+                    geometries
+                        .get(&controller.geometry_id)
+                        .and_then(|g| match_bone_from_name(&g.name, sections))
+                });
             if bone_index.is_none() {
                 for name in &controller.joint_names {
                     bone_index = resolve_bone_index(name, joint_lookup);
@@ -1447,11 +1452,6 @@ fn collect_mesh_bindings(
             }
             let bone_index = bone_index
                 .or_else(|| match_bone_from_name(node_name, sections))
-                .or_else(|| {
-                    geometries
-                        .get(&controller.geometry_id)
-                        .and_then(|g| match_bone_from_name(&g.name, sections))
-                })
                 .unwrap_or(0);
             let key = (controller.geometry_id.clone(), bone_index);
             if seen.insert(key.clone()) {
@@ -1987,6 +1987,169 @@ mod tests {
         let meta = parse_dae_to_meta_text(xml, "weights_test").unwrap();
         assert_eq!(meta.bone_meshes.len(), 1);
         assert_eq!(meta.bone_meshes[0].bone_index, 1);
+    }
+
+    #[test]
+    fn controller_binding_uses_geometry_bone_name_when_weights_are_absent() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <library_geometries>
+    <geometry id="geom_m02" name="pl0a_m02_0">
+      <mesh>
+        <source id="geom_m02-positions">
+          <float_array id="geom_m02-positions-array" count="9">0 0 0 1 0 0 0 1 0</float_array>
+          <technique_common><accessor source="#geom_m02-positions-array" count="3" stride="3"/></technique_common>
+        </source>
+        <vertices id="geom_m02-vertices">
+          <input semantic="POSITION" source="#geom_m02-positions"/>
+        </vertices>
+        <triangles count="1">
+          <input semantic="VERTEX" source="#geom_m02-vertices" offset="0"/>
+          <p>0 1 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+    <geometry id="geom_m11" name="pl0a_m11_5">
+      <mesh>
+        <source id="geom_m11-positions">
+          <float_array id="geom_m11-positions-array" count="9">0 0 0 1 0 0 0 1 0</float_array>
+          <technique_common><accessor source="#geom_m11-positions-array" count="3" stride="3"/></technique_common>
+        </source>
+        <vertices id="geom_m11-vertices">
+          <input semantic="POSITION" source="#geom_m11-positions"/>
+        </vertices>
+        <triangles count="1">
+          <input semantic="VERTEX" source="#geom_m11-vertices" offset="0"/>
+          <p>0 1 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_controllers>
+    <controller id="ctrl_m02">
+      <skin source="#geom_m02">
+        <source id="ctrl_m02-joints">
+          <Name_array id="ctrl_m02-joints-array" count="1">pl0a_m11</Name_array>
+          <technique_common><accessor source="#ctrl_m02-joints-array" count="1" stride="1"/></technique_common>
+        </source>
+        <source id="ctrl_m02-weights">
+          <float_array id="ctrl_m02-weights-array" count="1">1</float_array>
+          <technique_common><accessor source="#ctrl_m02-weights-array" count="1" stride="1"/></technique_common>
+        </source>
+        <joints><input semantic="JOINT" source="#ctrl_m02-joints"/></joints>
+      </skin>
+    </controller>
+    <controller id="ctrl_m11">
+      <skin source="#geom_m11">
+        <source id="ctrl_m11-joints">
+          <Name_array id="ctrl_m11-joints-array" count="1">pl0a_m11</Name_array>
+          <technique_common><accessor source="#ctrl_m11-joints-array" count="1" stride="1"/></technique_common>
+        </source>
+        <source id="ctrl_m11-weights">
+          <float_array id="ctrl_m11-weights-array" count="1">1</float_array>
+          <technique_common><accessor source="#ctrl_m11-weights-array" count="1" stride="1"/></technique_common>
+        </source>
+        <joints><input semantic="JOINT" source="#ctrl_m11-joints"/></joints>
+        <vertex_weights count="3">
+          <input semantic="JOINT" source="#ctrl_m11-joints" offset="0"/>
+          <input semantic="WEIGHT" source="#ctrl_m11-weights" offset="1"/>
+          <vcount>1 1 1</vcount>
+          <v>0 0 0 0 0 0</v>
+        </vertex_weights>
+      </skin>
+    </controller>
+  </library_controllers>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="VisualSceneNode65" name="pl0a_m11_5">
+        <instance_controller url="#ctrl_m02"/>
+        <instance_controller url="#ctrl_m11"/>
+      </node>
+      <node id="joint_2_pl0a_m02" name="pl0a_m02" type="JOINT">
+        <matrix>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+      </node>
+      <node id="joint_11_pl0a_m11" name="pl0a_m11" type="JOINT">
+        <matrix>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>"##;
+
+        let meta = parse_dae_to_meta_text(xml, "geometry_binding").unwrap();
+        let face_counts = meta
+            .bone_meshes
+            .iter()
+            .map(|mesh| (mesh.bone_name.as_str(), mesh.face_count))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(face_counts.get("pl0a_m02"), Some(&1));
+        assert_eq!(face_counts.get("pl0a_m11"), Some(&1));
+    }
+
+    #[test]
+    fn controller_binding_prefers_vertex_weights_over_geometry_name() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <library_geometries>
+    <geometry id="geom0" name="pl0a_m02_2">
+      <mesh>
+        <source id="geom0-positions">
+          <float_array id="geom0-positions-array" count="9">0 0 0 1 0 0 0 1 0</float_array>
+          <technique_common><accessor source="#geom0-positions-array" count="3" stride="3"/></technique_common>
+        </source>
+        <vertices id="geom0-vertices">
+          <input semantic="POSITION" source="#geom0-positions"/>
+        </vertices>
+        <triangles count="1">
+          <input semantic="VERTEX" source="#geom0-vertices" offset="0"/>
+          <p>0 1 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_controllers>
+    <controller id="ctrl0">
+      <skin source="#geom0">
+        <source id="ctrl0-joints">
+          <Name_array id="ctrl0-joints-array" count="2">pl0a_m02 pl0a_m11</Name_array>
+          <technique_common><accessor source="#ctrl0-joints-array" count="2" stride="1"/></technique_common>
+        </source>
+        <source id="ctrl0-weights">
+          <float_array id="ctrl0-weights-array" count="1">1</float_array>
+          <technique_common><accessor source="#ctrl0-weights-array" count="1" stride="1"/></technique_common>
+        </source>
+        <joints><input semantic="JOINT" source="#ctrl0-joints"/></joints>
+        <vertex_weights count="3">
+          <input semantic="JOINT" source="#ctrl0-joints" offset="0"/>
+          <input semantic="WEIGHT" source="#ctrl0-weights" offset="1"/>
+          <vcount>1 1 1</vcount>
+          <v>1 0 1 0 1 0</v>
+        </vertex_weights>
+      </skin>
+    </controller>
+  </library_controllers>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="VisualSceneNode112" name="pl0a_m02_2">
+        <instance_controller url="#ctrl0"/>
+      </node>
+      <node id="joint_2_pl0a_m02" name="pl0a_m02" type="JOINT">
+        <matrix>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+      </node>
+      <node id="joint_11_pl0a_m11" name="pl0a_m11" type="JOINT">
+        <matrix>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>"##;
+
+        let meta = parse_dae_to_meta_text(xml, "weighted_geometry_binding").unwrap();
+
+        assert_eq!(meta.bone_meshes.len(), 1);
+        assert_eq!(meta.bone_meshes[0].bone_name, "pl0a_m11");
+        assert_eq!(meta.bone_meshes[0].face_count, 1);
     }
 
     #[test]

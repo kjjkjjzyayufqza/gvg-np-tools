@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn ru32(d: &[u8], o: usize) -> u32 {
     if o + 4 > d.len() {
@@ -908,6 +908,25 @@ fn clamp_i16(val: i32) -> i16 {
 }
 
 type EncodedVertex = (i16, i16, i16, i16, i16, i16, i16, i16);
+const MAX_TRIANGLE_PRIM_VERTICES: usize = 0xFFFC;
+
+fn triangle_prim_chunks(vertex_count: usize) -> Vec<(usize, usize)> {
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < vertex_count {
+        let remaining = vertex_count - start;
+        let mut count = remaining.min(MAX_TRIANGLE_PRIM_VERTICES);
+        if remaining > MAX_TRIANGLE_PRIM_VERTICES {
+            count -= count % 3;
+        }
+        if count == 0 {
+            break;
+        }
+        chunks.push((start, count));
+        start += count;
+    }
+    chunks
+}
 
 fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
     let sx = bbox[0] / 32768.0;
@@ -963,9 +982,12 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
     }
     vtype |= 2 << 7;
 
-    let num_cmds = 2 + 3 + 1;
+    let chunks = triangle_prim_chunks(seq_verts.len());
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+    let num_cmds = 2 + chunks.len() * 4 + 1;
     let cmd_block_size = num_cmds * 4;
-    let vert_buf_start = cmd_block_size;
 
     let mut vert_buf = Vec::new();
     for vtx in &seq_verts {
@@ -993,13 +1015,14 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
     };
     push_cmd(&mut ge, 0x14, 0);
     push_cmd(&mut ge, 0x10, 0);
-    push_cmd(&mut ge, 0x01, vert_buf_start as u32);
-    push_cmd(&mut ge, 0x12, vtype);
-    push_cmd(
-        &mut ge,
-        0x04,
-        (PRIM_TRIANGLES as u32) << 16 | seq_verts.len() as u32,
-    );
+    let vertex_size = VtypeInfo::decode(vtype).vertex_size();
+    for (start, count) in &chunks {
+        let vaddr = cmd_block_size + start * vertex_size;
+        push_cmd(&mut ge, 0x01, vaddr as u32);
+        push_cmd(&mut ge, 0x12, vtype);
+        push_cmd(&mut ge, 0x9B, 1);
+        push_cmd(&mut ge, 0x04, (PRIM_TRIANGLES as u32) << 16 | *count as u32);
+    }
     push_cmd(&mut ge, 0x0B, 0);
 
     while ge.len() < cmd_block_size {
@@ -1031,6 +1054,113 @@ fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshM
             *dst = mapped;
         }
         faces.push(out_face);
+    }
+
+    Some(BoneMeshMeta {
+        bone_index: mesh.bone_index,
+        bone_name: mesh.bone_name.clone(),
+        vertex_count: local_vertices.len(),
+        face_count: faces.len(),
+        has_uv: mesh.has_uv,
+        has_normals: mesh.has_normals,
+        draw_call_vtypes: Vec::new(),
+        local_vertices,
+        faces,
+    })
+}
+
+type FaceSignature = [(i32, i32, i32); 3];
+
+fn quantize_face_position(v: &[f32; 8]) -> (i32, i32, i32) {
+    const SCALE: f32 = 1000.0;
+    (
+        (v[0] * SCALE).round() as i32,
+        (v[1] * SCALE).round() as i32,
+        (v[2] * SCALE).round() as i32,
+    )
+}
+
+fn quantize_parsed_position(v: &ParsedVertex) -> (i32, i32, i32) {
+    const SCALE: f32 = 1000.0;
+    (
+        (v.x * SCALE).round() as i32,
+        (v.y * SCALE).round() as i32,
+        (v.z * SCALE).round() as i32,
+    )
+}
+
+fn face_signature_from_points(mut points: [(i32, i32, i32); 3]) -> FaceSignature {
+    points.sort_unstable();
+    points
+}
+
+fn collect_world_face_signatures(meshes: &[BoneMeshData]) -> HashSet<FaceSignature> {
+    let mut signatures = HashSet::new();
+    for mesh in meshes {
+        for &(a, b, c) in &mesh.faces {
+            if a >= mesh.vertices.len() || b >= mesh.vertices.len() || c >= mesh.vertices.len() {
+                continue;
+            }
+            signatures.insert(face_signature_from_points([
+                quantize_parsed_position(&mesh.vertices[a]),
+                quantize_parsed_position(&mesh.vertices[b]),
+                quantize_parsed_position(&mesh.vertices[c]),
+            ]));
+        }
+    }
+    signatures
+}
+
+fn mesh_face_world_signature(
+    mesh: &BoneMeshMeta,
+    face: &[usize; 3],
+    world_matrix: &[f32],
+) -> Option<FaceSignature> {
+    let mut points = [(0, 0, 0); 3];
+    for (dst, src_idx) in points.iter_mut().zip(face.iter()) {
+        let v = mesh.local_vertices.get(*src_idx)?;
+        let (x, y, z) = transform_pt(world_matrix, v[0], v[1], v[2]);
+        let world_vertex = [x, y, z, v[3], v[4], v[5], v[6], v[7]];
+        *dst = quantize_face_position(&world_vertex);
+    }
+    Some(face_signature_from_points(points))
+}
+
+fn build_mesh_suffix_without_existing_world_faces(
+    mesh: &BoneMeshMeta,
+    face_start: usize,
+    world_matrix: &[f32],
+    existing_faces: &HashSet<FaceSignature>,
+) -> Option<BoneMeshMeta> {
+    if face_start >= mesh.faces.len() {
+        return None;
+    }
+
+    let mut remap: HashMap<usize, usize> = HashMap::new();
+    let mut local_vertices = Vec::new();
+    let mut faces = Vec::new();
+    for face in &mesh.faces[face_start..] {
+        let signature = mesh_face_world_signature(mesh, face, world_matrix)?;
+        if existing_faces.contains(&signature) {
+            continue;
+        }
+        let mut out_face = [0usize; 3];
+        for (dst, &src_idx) in out_face.iter_mut().zip(face.iter()) {
+            if src_idx >= mesh.local_vertices.len() {
+                return None;
+            }
+            let next_idx = remap.len();
+            let mapped = *remap.entry(src_idx).or_insert_with(|| {
+                local_vertices.push(mesh.local_vertices[src_idx]);
+                next_idx
+            });
+            *dst = mapped;
+        }
+        faces.push(out_face);
+    }
+
+    if faces.is_empty() {
+        return None;
     }
 
     Some(BoneMeshMeta {
@@ -1129,7 +1259,11 @@ fn append_mesh_draw_to_template_section(
     bbox: &[f32; 3],
 ) -> Option<Vec<u8>> {
     let (vtype, vert_buf, vertex_count) = encode_mesh_vertices(mesh, bbox)?;
-    if vertex_count > u16::MAX as usize || origin_rel + 4 > template_section.len() {
+    if origin_rel + 4 > template_section.len() {
+        return None;
+    }
+    let chunks = triangle_prim_chunks(vertex_count);
+    if chunks.is_empty() {
         return None;
     }
 
@@ -1152,13 +1286,16 @@ fn append_mesh_draw_to_template_section(
     };
 
     let mut inserted_cmds = Vec::new();
-    push_cmd(&mut inserted_cmds, GE_CMD_VADDR, 0);
-    push_cmd(&mut inserted_cmds, GE_CMD_VERTEXTYPE, vtype);
-    push_cmd(
-        &mut inserted_cmds,
-        GE_CMD_PRIM,
-        (PRIM_TRIANGLES as u32) << 16 | vertex_count as u32,
-    );
+    for (_, count) in &chunks {
+        push_cmd(&mut inserted_cmds, GE_CMD_VADDR, 0);
+        push_cmd(&mut inserted_cmds, GE_CMD_VERTEXTYPE, vtype);
+        push_cmd(&mut inserted_cmds, 0x9B, 1);
+        push_cmd(
+            &mut inserted_cmds,
+            GE_CMD_PRIM,
+            (PRIM_TRIANGLES as u32) << 16 | *count as u32,
+        );
+    }
     let inserted_len = inserted_cmds.len();
 
     let mut out = template_section.to_vec();
@@ -1179,11 +1316,16 @@ fn append_mesh_draw_to_template_section(
 
     out.splice(ret_rel..ret_rel, inserted_cmds);
     let extra_vaddr = out.len().checked_sub(origin_rel)?;
-    if extra_vaddr > 0xFFFFFF {
-        return None;
+    let vertex_size = VtypeInfo::decode(vtype).vertex_size();
+    for (chunk_idx, (start, _)) in chunks.iter().enumerate() {
+        let chunk_vaddr = extra_vaddr.checked_add(start.checked_mul(vertex_size)?)?;
+        if chunk_vaddr > 0xFFFFFF {
+            return None;
+        }
+        let patched_vaddr = ((GE_CMD_VADDR as u32) << 24) | chunk_vaddr as u32;
+        let vaddr_pos = ret_rel + chunk_idx * 16;
+        out[vaddr_pos..vaddr_pos + 4].copy_from_slice(&patched_vaddr.to_le_bytes());
     }
-    let patched_vaddr = ((GE_CMD_VADDR as u32) << 24) | extra_vaddr as u32;
-    out[ret_rel..ret_rel + 4].copy_from_slice(&patched_vaddr.to_le_bytes());
     out.extend_from_slice(&vert_buf);
     Some(out)
 }
@@ -1416,6 +1558,7 @@ pub fn patch_pmf2_with_mesh_updates(
     }
 
     let (template_meshes, _, _, _) = extract_per_bone_meshes(template_pmf2, false);
+    let template_world_faces = collect_world_face_signatures(&template_meshes);
     let mut template_mesh_by_name: HashMap<String, &BoneMeshData> = HashMap::new();
     for bm in &template_meshes {
         template_mesh_by_name.insert(bm.bone_name.to_ascii_lowercase(), bm);
@@ -1429,6 +1572,7 @@ pub fn patch_pmf2_with_mesh_updates(
     for bm in &meta.bone_meshes {
         source_mesh_by_name.insert(bm.bone_name.to_ascii_lowercase(), bm);
     }
+    let source_world_mats = compute_world_matrices(&meta.sections);
 
     let mut bbox = compute_auto_bbox_from_bone_meshes(&meta.bone_meshes).unwrap_or(template_bbox);
     for axis in 0..3 {
@@ -1492,7 +1636,17 @@ pub fn patch_pmf2_with_mesh_updates(
         let mut sec_buf = header.clone();
         if let Some(mesh) = src_mesh.filter(|_| dae_face_count > 0) {
             if template_had_mesh && dae_face_count > orig_faces {
-                let extra_mesh = build_mesh_suffix(mesh, orig_faces);
+                let used_existing_face_filter = source_world_mats.contains_key(&mesh.bone_index);
+                let extra_mesh = if let Some(world) = source_world_mats.get(&mesh.bone_index) {
+                    build_mesh_suffix_without_existing_world_faces(
+                        mesh,
+                        orig_faces,
+                        world,
+                        &template_world_faces,
+                    )
+                } else {
+                    build_mesh_suffix(mesh, orig_faces)
+                };
                 let appended = extra_mesh.as_ref().and_then(|extra| {
                     tsec.origin_offset.and_then(|origin| {
                         let origin_rel = origin.checked_sub(sec_start)?;
@@ -1512,10 +1666,13 @@ pub fn patch_pmf2_with_mesh_updates(
                     eprintln!(
                         "  [patch-mesh] appended GE for {}: +{} faces, preserved template mesh (was {} faces)",
                         tsec.name,
-                        dae_face_count - orig_faces,
+                        extra_mesh
+                            .as_ref()
+                            .map(|mesh| mesh.face_count)
+                            .unwrap_or(dae_face_count - orig_faces),
                         orig_faces
                     );
-                } else if dae_face_count != orig_faces {
+                } else if dae_face_count != orig_faces && !used_existing_face_filter {
                     let ge_data = build_ge_commands(mesh, &bbox);
                     if !ge_data.is_empty() {
                         sec_buf.extend_from_slice(&ge_data);
@@ -1536,19 +1693,44 @@ pub fn patch_pmf2_with_mesh_updates(
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                 }
             } else if dae_face_count != orig_faces {
-                let ge_data = build_ge_commands(mesh, &bbox);
-                if !ge_data.is_empty() {
-                    if !template_had_mesh {
-                        sec_buf[0x70..0x74].copy_from_slice(&0u32.to_le_bytes());
+                let filtered_mesh = if !template_had_mesh {
+                    source_world_mats.get(&mesh.bone_index).and_then(|world| {
+                        build_mesh_suffix_without_existing_world_faces(
+                            mesh,
+                            0,
+                            world,
+                            &template_world_faces,
+                        )
+                    })
+                } else {
+                    None
+                };
+                let mesh_for_ge =
+                    if !template_had_mesh && source_world_mats.contains_key(&mesh.bone_index) {
+                        filtered_mesh.as_ref()
+                    } else {
+                        Some(*mesh)
+                    };
+                if let Some(mesh_for_ge) = mesh_for_ge {
+                    let ge_data = build_ge_commands(mesh_for_ge, &bbox);
+                    if !ge_data.is_empty() {
+                        if !template_had_mesh {
+                            sec_buf[0x70..0x74].copy_from_slice(&0u32.to_le_bytes());
+                        }
+                        sec_buf.extend_from_slice(&ge_data);
+                        eprintln!(
+                            "  [patch-mesh] rebuilt GE for {}: {} verts, {} faces (was {} faces)",
+                            tsec.name,
+                            mesh_for_ge.local_vertices.len(),
+                            mesh_for_ge.face_count,
+                            orig_faces
+                        );
+                    } else if sec_end > header_end {
+                        sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                     }
-                    sec_buf.extend_from_slice(&ge_data);
-                    eprintln!(
-                        "  [patch-mesh] rebuilt GE for {}: {} verts, {} faces (was {} faces)",
-                        tsec.name,
-                        mesh.local_vertices.len(),
-                        dae_face_count,
-                        orig_faces
-                    );
+                } else if let Some(mut section) = preserved_section {
+                    section[..0x100].copy_from_slice(&header[..0x100]);
+                    sec_buf = section;
                 } else if sec_end > header_end {
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                 }
@@ -1768,6 +1950,72 @@ mod tests {
 
         let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
         assert_eq!(meshes[0].faces.len(), 2);
+    }
+
+    #[test]
+    fn patch_append_filters_faces_that_already_exist_in_template() {
+        let template_pmf2 = template_with_custom_mesh_command();
+        let mut source_mesh = test_mesh("root", 2);
+        source_mesh.faces = vec![
+            source_mesh.faces[0],
+            source_mesh.faces[0],
+            source_mesh.faces[1],
+        ];
+        source_mesh.face_count = source_mesh.faces.len();
+        let source_meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [2.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![source_mesh],
+        };
+
+        let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
+        let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
+        assert_eq!(meshes[0].faces.len(), 2);
+    }
+
+    #[test]
+    fn build_ge_commands_splits_meshes_that_exceed_prim_vertex_limit() {
+        let mesh = test_mesh("root", 22_000);
+        let ge_data = build_ge_commands(&mesh, &[64.0, 64.0, 64.0]);
+        let prim_counts = ge_data
+            .chunks_exact(4)
+            .filter_map(|word| {
+                let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+                (((value >> 24) & 0xFF) as u8 == GE_CMD_PRIM).then_some(value & 0xFFFF)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(prim_counts.len() > 1);
+        assert!(prim_counts.iter().all(|count| *count <= u16::MAX as u32));
+        assert_eq!(prim_counts.iter().sum::<u32>(), 22_000 * 3);
+    }
+
+    #[test]
+    fn build_ge_commands_emits_bbox_command_before_prim() {
+        let mesh = test_mesh("root", 1);
+        let ge_data = build_ge_commands(&mesh, &[2.0, 2.0, 2.0]);
+        let words = ge_data
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect::<Vec<_>>();
+        let prim_pos = words
+            .iter()
+            .position(|word| ((*word >> 24) & 0xFF) as u8 == GE_CMD_PRIM)
+            .unwrap();
+
+        assert_eq!(words[prim_pos - 1], 0x9B000001);
     }
 
     #[test]
