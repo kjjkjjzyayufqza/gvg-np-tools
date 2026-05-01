@@ -903,7 +903,7 @@ impl GvgModdingApp {
                 return;
             }
         };
-        let replaced = match image.replace_png_bytes(&png_data) {
+        let replaced = match image.replace_png_bytes_resized(&png_data) {
             Ok(d) => d,
             Err(e) => {
                 self.notify_error(format!("GIM replace failed: {e}"));

@@ -894,12 +894,15 @@ fn update_cwcheat_body_sizes(
     }
 
     // Rebuild dirty PZZ entries to get their final file sizes.
-    let mut dirty_rebuilt_sizes = std::collections::BTreeMap::<usize, usize>::new();
+    let mut dirty_rebuilt_body_sizes = std::collections::BTreeMap::<usize, usize>::new();
     let rebuilt_entries = workspace
         .rebuild_dirty_pzz_entries_with(rebuild_pzz_payload_cached)
         .map_err(|e| format!("Failed to rebuild dirty PZZ entries: {}", e))?;
     for (entry_index, rebuilt) in rebuilt_entries {
-        dirty_rebuilt_sizes.insert(entry_index, rebuilt.len());
+        let body_size = pzz::inspect_pzz(&rebuilt)
+            .map_err(|e| format!("Failed to inspect rebuilt entry {}: {}", entry_index, e))?
+            .body_size;
+        dirty_rebuilt_body_sizes.insert(entry_index, body_size);
     }
 
     let mut output = String::new();
@@ -933,11 +936,11 @@ fn update_cwcheat_body_sizes(
         if entry.validation != EntryValidation::Ok {
             continue;
         }
-        let file_size = dirty_rebuilt_sizes
+        let body_size = dirty_rebuilt_body_sizes
             .get(&entry.index)
             .copied()
-            .unwrap_or(entry.size);
-        if file_size < 16 {
+            .unwrap_or_else(|| entry.size.saturating_sub(16));
+        if body_size == 0 {
             continue;
         }
         let rom_addr = ROM_TABLE_BASE.wrapping_add((entry.index as u32) * 4);
@@ -945,8 +948,8 @@ fn update_cwcheat_body_sizes(
         entries.push(BodySizeEntry {
             name: base_name.to_string(),
             cwcheat_addr: CWCHEAT_WRITE32_PREFIX | (rom_addr - PSP_VA_OFFSET),
-            body_size: file_size - 16,
-            dirty: dirty_rebuilt_sizes.contains_key(&entry.index),
+            body_size,
+            dirty: dirty_rebuilt_body_sizes.contains_key(&entry.index),
         });
     }
     let total_entry_count = entries.len();
@@ -988,4 +991,65 @@ fn update_cwcheat_body_sizes(
     }
 
     Ok((output, total_entry_count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{pzz, workspace::ModWorkspace};
+
+    fn write_u32_le(data: &mut [u8], offset: usize, value: u32) {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn align_up(value: usize, alignment: usize) -> usize {
+        (value + alignment - 1) & !(alignment - 1)
+    }
+
+    fn make_afs(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let file_count = entries.len();
+        let name_table_pos = 8 + file_count * 8;
+        let names_start = name_table_pos + 8;
+        let name_table_size = file_count * 0x30;
+        let mut data_offset = align_up(names_start + name_table_size, 2048);
+        let mut data = vec![0u8; data_offset];
+        data[0..4].copy_from_slice(b"AFS\0");
+        write_u32_le(&mut data, 4, file_count as u32);
+        write_u32_le(&mut data, name_table_pos, names_start as u32);
+        write_u32_le(&mut data, name_table_pos + 4, name_table_size as u32);
+        for (index, (name, payload)) in entries.iter().enumerate() {
+            let table_pos = 8 + index * 8;
+            write_u32_le(&mut data, table_pos, data_offset as u32);
+            write_u32_le(&mut data, table_pos + 4, payload.len() as u32);
+            let name_pos = names_start + index * 0x30;
+            data[name_pos..name_pos + name.len()].copy_from_slice(name.as_bytes());
+            write_u32_le(&mut data, name_pos + 0x2C, payload.len() as u32);
+            data.resize(data_offset + align_up(payload.len(), 2048), 0);
+            data[data_offset..data_offset + payload.len()].copy_from_slice(payload);
+            data_offset += align_up(payload.len(), 2048);
+        }
+        data
+    }
+
+    #[test]
+    fn dirty_body_size_patch_uses_rebuilt_pzz_inspected_body_size() {
+        let original_pzz = pzz::build_pzz(&[b"MIG.00.1PSP_original".to_vec()], 0x1234_5678);
+        let afs = make_afs(&[("pl0a.pzz", &original_pzz)]);
+        let mut workspace = ModWorkspace::open_afs_bytes("Z_DATA.BIN", afs).unwrap();
+        workspace.open_pzz_entry(0).unwrap();
+        workspace
+            .replace_stream(0, b"MIG.00.1PSP_replacement_that_changes_size".to_vec())
+            .unwrap();
+
+        let (text, _) = update_cwcheat_body_sizes("", &mut workspace).unwrap();
+        let rebuilt = workspace
+            .rebuild_dirty_pzz_entries_with(crate::save::rebuild_pzz_payload_cached)
+            .unwrap()
+            .remove(0)
+            .1;
+        let exact_body_size = pzz::inspect_pzz(&rebuilt).unwrap().body_size;
+
+        assert!(text.contains(&format!("0x{:08X}", exact_body_size)));
+        assert!(!text.contains(&format!("0x{:08X}", rebuilt.len().saturating_sub(16))));
+    }
 }
