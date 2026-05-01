@@ -1,3 +1,4 @@
+use super::gim_preview_cache::{gim_data_identity, GimPreviewCache, GimPreviewCacheKey};
 use crate::{
     pmf2, pzz,
     save::{rebuild_pzz_payload, rebuild_pzz_payload_cached, PzzSavePlan, PzzSavePlanner},
@@ -6,7 +7,7 @@ use crate::{
 };
 use anyhow::Result;
 use eframe::egui;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 const ROM_TABLE_BASE: u32 = 0x8A56160;
 const PSP_VA_OFFSET: u32 = 0x08800000;
@@ -79,6 +80,7 @@ pub struct EditorWindows {
     pmf2_metadata_state: Option<Pmf2MetadataEditorState>,
     cached_save_plan: Option<Result<PzzSavePlan, String>>,
     cwcheat_state: CwCheatEditorState,
+    gim_preview_cache: GimPreviewCache,
 }
 
 impl EditorWindows {
@@ -219,6 +221,7 @@ pub fn show_editor_windows(
                     ui,
                     workspace,
                     stream_index,
+                    &mut editors.gim_preview_cache,
                     last_dir_export_stream_png,
                     last_dir_replace_stream_png,
                 ) {
@@ -457,14 +460,16 @@ fn show_gim_preview_editor(
     ui: &mut egui::Ui,
     workspace: &mut ModWorkspace,
     stream_index: usize,
+    cache: &mut GimPreviewCache,
     last_dir_export_stream_png: &mut Option<PathBuf>,
     last_dir_replace_stream_png: &mut Option<PathBuf>,
 ) -> Option<EditorAction> {
-    let data = workspace
-        .open_pzz()
-        .and_then(|pzz| pzz.stream_data().get(stream_index))
-        .map(Vec::as_slice);
-    let Some(data) = data else {
+    let stream = workspace.open_pzz().and_then(|pzz| {
+        pzz.stream_data()
+            .get(stream_index)
+            .map(|data| (data.as_slice(), pzz.revision()))
+    });
+    let Some((data, pzz_revision)) = stream else {
         ui.label("Stream not available.");
         return None;
     };
@@ -472,53 +477,61 @@ fn show_gim_preview_editor(
         ui.label("Not a GIM stream.");
         return None;
     }
-    let image = match GimImage::decode(data) {
-        Ok(img) => img,
-        Err(e) => {
-            ui.label(format!("GIM decode failed: {e}"));
-            return None;
-        }
+    let key = GimPreviewCacheKey {
+        stream_index,
+        pzz_revision,
+        data_identity: gim_data_identity(data),
     };
-
-    ui.label(format!(
-        "{}x{} {:?}{}",
-        image.metadata.width,
-        image.metadata.height,
-        image.metadata.format,
-        if image.metadata.swizzled {
-            " (swizzled)"
-        } else {
-            ""
-        }
-    ));
-
+    if let Err(e) = cache.ensure_decoded(key, data) {
+        ui.label(format!("GIM decode failed: {e}"));
+        return None;
+    }
     let mut result = None;
-    ui.horizontal(|ui| {
-        if ui.button("Export PNG").clicked() {
-            result = Some(export_gim_png(&image, last_dir_export_stream_png));
-        }
-        if ui.button("Replace from PNG").clicked() {
-            result = Some(replace_gim_png(
-                &image,
-                workspace,
-                stream_index,
-                last_dir_replace_stream_png,
-            ));
-        }
-    });
+    let mut replace_image = None;
+
+    {
+        let Some(image) = cache.image() else {
+            ui.label("GIM decode failed: preview cache is empty.");
+            return None;
+        };
+
+        ui.label(format!(
+            "{}x{} {:?}{}",
+            image.metadata.width,
+            image.metadata.height,
+            image.metadata.format,
+            if image.metadata.swizzled {
+                " (swizzled)"
+            } else {
+                ""
+            }
+        ));
+
+        ui.horizontal(|ui| {
+            if ui.button("Export PNG").clicked() {
+                result = Some(export_gim_png(image, last_dir_export_stream_png));
+            }
+            if ui.button("Replace from PNG").clicked() {
+                replace_image = Some(image.clone());
+            }
+        });
+    }
     ui.separator();
 
-    let flat: Vec<u8> = image.rgba.iter().flat_map(|p| *p).collect();
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-        [image.metadata.width, image.metadata.height],
-        &flat,
-    );
-    let texture = ui.ctx().load_texture(
-        format!("gim_editor_{}", stream_index),
-        color_image,
-        egui::TextureOptions::NEAREST,
-    );
-    ui.image((texture.id(), texture.size_vec2()));
+    if let Some(texture) = cache.texture_handle(ui.ctx(), format!("gim_editor_{}", stream_index)) {
+        ui.image((texture.id(), texture.size_vec2()));
+    } else {
+        ui.label("GIM texture failed: preview cache is empty.");
+    }
+
+    if let Some(image) = replace_image {
+        result = Some(replace_gim_png(
+            &image,
+            workspace,
+            stream_index,
+            last_dir_replace_stream_png,
+        ));
+    }
 
     result
 }
@@ -563,6 +576,7 @@ fn replace_gim_png(
         return EditorAction::none();
     };
     super::remember_parent_dir(last_dir, &path);
+    let png_read_started = Instant::now();
     let png_data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) => {
@@ -574,6 +588,13 @@ fn replace_gim_png(
             };
         }
     };
+    eprintln!(
+        "[gui] preview editor read replacement PNG {} ({} bytes) in {:?}",
+        path.display(),
+        png_data.len(),
+        png_read_started.elapsed()
+    );
+    let replace_started = Instant::now();
     let replaced = match image.replace_png_bytes(&png_data) {
         Ok(d) => d,
         Err(e) => {
@@ -585,8 +606,21 @@ fn replace_gim_png(
             };
         }
     };
+    eprintln!(
+        "[gui] preview editor rebuilt GIM stream {} in {:?}",
+        stream_index,
+        replace_started.elapsed()
+    );
+    let workspace_replace_started = Instant::now();
     match workspace.replace_stream(stream_index, replaced) {
-        Ok(()) => EditorAction::status_touch_dirs("Replaced GIM stream from PNG".to_string()),
+        Ok(()) => {
+            eprintln!(
+                "[gui] preview editor replaced workspace stream {} in {:?}",
+                stream_index,
+                workspace_replace_started.elapsed()
+            );
+            EditorAction::status_touch_dirs("Replaced GIM stream from PNG".to_string())
+        }
         Err(e) => EditorAction {
             status: Some(format!("Stream replace failed: {e}")),
             error_modal: true,

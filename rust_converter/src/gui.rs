@@ -1,6 +1,7 @@
 mod asset_tree;
 mod editors;
 mod fonts;
+mod gim_preview_cache;
 mod inspector;
 mod persist;
 mod preview;
@@ -21,6 +22,7 @@ use eframe::egui;
 use eframe::egui_wgpu::wgpu;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Instant;
 
 pub(super) fn remember_parent_dir(memory: &mut Option<std::path::PathBuf>, path: &Path) {
     if let Some(dir) = path.parent() {
@@ -48,6 +50,7 @@ pub struct GvgModdingApp {
     tree_state: AssetTreeState,
     preview_state: PreviewState,
     editors: EditorWindows,
+    inspector_gim_cache: gim_preview_cache::GimPreviewCache,
     status: String,
     show_left_panel: bool,
     show_right_panel: bool,
@@ -172,6 +175,7 @@ impl GvgModdingApp {
             tree_state: AssetTreeState::default(),
             preview_state: PreviewState::default(),
             editors: EditorWindows::default(),
+            inspector_gim_cache: gim_preview_cache::GimPreviewCache::default(),
             status: "Ready".to_string(),
             show_left_panel: true,
             show_right_panel: true,
@@ -249,6 +253,7 @@ impl eframe::App for GvgModdingApp {
                         &self.workspace,
                         self.tree_state.selected_afs_entry,
                         self.tree_state.selected_stream,
+                        &mut self.inspector_gim_cache,
                     );
                 });
         }
@@ -1094,6 +1099,7 @@ impl GvgModdingApp {
     }
 
     fn replace_stream_png(&mut self, stream_index: usize) {
+        let decode_started = Instant::now();
         let Some(data) = self.get_stream_data(stream_index).map(|d| d.to_vec()) else {
             self.notify_error("Stream not available.".to_owned());
             return;
@@ -1105,6 +1111,11 @@ impl GvgModdingApp {
                 return;
             }
         };
+        eprintln!(
+            "[gui] decoded current GIM stream {} before PNG replace in {:?}",
+            stream_index,
+            decode_started.elapsed()
+        );
         let mut dialog = rfd::FileDialog::new().add_filter("PNG", &["png"]);
         if let Some(dir) = &self.last_dir_replace_stream_png {
             dialog = dialog.set_directory(dir);
@@ -1117,6 +1128,7 @@ impl GvgModdingApp {
             &path,
             &mut self.gui_state_dirty,
         );
+        let png_read_started = Instant::now();
         let png_data = match std::fs::read(&path) {
             Ok(d) => d,
             Err(e) => {
@@ -1124,6 +1136,13 @@ impl GvgModdingApp {
                 return;
             }
         };
+        eprintln!(
+            "[gui] read replacement PNG {} ({} bytes) in {:?}",
+            path.display(),
+            png_data.len(),
+            png_read_started.elapsed()
+        );
+        let replace_started = Instant::now();
         let replaced = match image.replace_png_bytes_resized(&png_data) {
             Ok(d) => d,
             Err(e) => {
@@ -1131,8 +1150,19 @@ impl GvgModdingApp {
                 return;
             }
         };
+        eprintln!(
+            "[gui] rebuilt replacement GIM stream {} in {:?}",
+            stream_index,
+            replace_started.elapsed()
+        );
+        let workspace_replace_started = Instant::now();
         match self.workspace.replace_stream(stream_index, replaced) {
             Ok(()) => {
+                eprintln!(
+                    "[gui] replaced workspace stream {} in {:?}",
+                    stream_index,
+                    workspace_replace_started.elapsed()
+                );
                 self.gpu_mesh_stream_index = None;
                 self.gpu_mesh_pzz_revision = None;
                 self.gpu_texture_bind_group = None;

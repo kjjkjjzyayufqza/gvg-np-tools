@@ -1,6 +1,6 @@
+use super::gim_preview_cache::{gim_data_identity, GimPreviewCache, GimPreviewCacheKey};
 use crate::{
     pmf2, pzz,
-    texture::GimImage,
     workspace::{AssetKind, EntryValidation, ModWorkspace},
 };
 use eframe::egui;
@@ -10,6 +10,7 @@ pub fn show_inspector(
     workspace: &ModWorkspace,
     selected_afs_entry: Option<usize>,
     selected_stream: Option<usize>,
+    gim_cache: &mut GimPreviewCache,
 ) {
     ui.heading("Inspector");
     ui.separator();
@@ -17,7 +18,13 @@ pub fn show_inspector(
     if let Some(stream_index) = selected_stream {
         if let Some(pzz) = workspace.open_pzz() {
             if let Some(stream_node) = pzz.streams().get(stream_index) {
-                show_stream_inspector(ui, stream_node, pzz.stream_data().get(stream_index));
+                show_stream_inspector(
+                    ui,
+                    stream_node,
+                    pzz.stream_data().get(stream_index),
+                    pzz.revision(),
+                    gim_cache,
+                );
                 return;
             }
         }
@@ -57,6 +64,8 @@ fn show_stream_inspector(
     ui: &mut egui::Ui,
     stream: &crate::workspace::StreamNode,
     data: Option<&Vec<u8>>,
+    pzz_revision: u64,
+    gim_cache: &mut GimPreviewCache,
 ) {
     ui.strong(&stream.name);
     ui.separator();
@@ -71,7 +80,7 @@ fn show_stream_inspector(
 
     match stream.kind {
         AssetKind::Pmf2 => show_pmf2_summary(ui, data),
-        AssetKind::Gim => show_gim_summary(ui, data),
+        AssetKind::Gim => show_gim_summary(ui, stream.index, pzz_revision, data, gim_cache),
         _ => show_raw_summary(ui, data),
     }
 }
@@ -179,10 +188,25 @@ fn show_pmf2_summary(ui: &mut egui::Ui, data: &[u8]) {
         });
 }
 
-fn show_gim_summary(ui: &mut egui::Ui, data: &[u8]) {
+fn show_gim_summary(
+    ui: &mut egui::Ui,
+    stream_index: usize,
+    pzz_revision: u64,
+    data: &[u8],
+    cache: &mut GimPreviewCache,
+) {
     ui.strong("GIM Summary");
-    match GimImage::decode(data) {
-        Ok(image) => {
+    let key = GimPreviewCacheKey {
+        stream_index,
+        pzz_revision,
+        data_identity: gim_data_identity(data),
+    };
+    match cache.ensure_decoded(key, data) {
+        Ok(()) => {
+            let Some(image) = cache.image() else {
+                ui.label("GIM decode error: preview cache is empty.");
+                return;
+            };
             labeled_row(
                 ui,
                 "Dimensions",
@@ -194,26 +218,23 @@ fn show_gim_summary(ui: &mut egui::Ui, data: &[u8]) {
                 "Swizzled",
                 if image.metadata.swizzled { "Yes" } else { "No" },
             );
+            let metadata = image.metadata.clone();
             ui.separator();
-            let flat: Vec<u8> = image.rgba.iter().flat_map(|p| *p).collect();
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                [image.metadata.width, image.metadata.height],
-                &flat,
-            );
-            let texture = ui.ctx().load_texture(
-                "inspector_gim_thumb",
-                color_image,
-                egui::TextureOptions::NEAREST,
-            );
-            let max_side = 200.0;
-            let scale = (max_side / image.metadata.width as f32)
-                .min(max_side / image.metadata.height as f32)
-                .min(1.0);
-            let display_size = egui::vec2(
-                image.metadata.width as f32 * scale,
-                image.metadata.height as f32 * scale,
-            );
-            ui.image((texture.id(), display_size));
+            if let Some(texture) =
+                cache.texture_handle(ui.ctx(), format!("inspector_gim_thumb_{}", stream_index))
+            {
+                let max_side = 200.0;
+                let scale = (max_side / metadata.width as f32)
+                    .min(max_side / metadata.height as f32)
+                    .min(1.0);
+                let display_size = egui::vec2(
+                    metadata.width as f32 * scale,
+                    metadata.height as f32 * scale,
+                );
+                ui.image((texture.id(), display_size));
+            } else {
+                ui.label("GIM texture error: preview cache is empty.");
+            }
         }
         Err(e) => {
             ui.label(format!("GIM decode error: {e}"));

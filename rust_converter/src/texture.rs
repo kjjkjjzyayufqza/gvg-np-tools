@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use std::{collections::BTreeMap, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -148,13 +149,26 @@ impl GimImage {
     }
 
     pub fn replace_png_bytes_resized(&self, png: &[u8]) -> Result<Vec<u8>> {
+        let png_decode_started = Instant::now();
         let image = image::load_from_memory(png)?.to_rgba8();
         let width = image.width() as usize;
         let height = image.height() as usize;
+        eprintln!(
+            "[texture] decoded replacement PNG {}x{} in {:?}",
+            width,
+            height,
+            png_decode_started.elapsed()
+        );
+        let collect_started = Instant::now();
         let pixels = image
             .pixels()
             .map(|p| [p.0[0], p.0[1], p.0[2], p.0[3]])
             .collect::<Vec<_>>();
+        eprintln!(
+            "[texture] collected {} replacement pixels in {:?}",
+            pixels.len(),
+            collect_started.elapsed()
+        );
 
         if self.metadata.format != PixelFormat::Indexed8 {
             if width != self.metadata.width || height != self.metadata.height {
@@ -165,7 +179,13 @@ impl GimImage {
             return self.replace_rgba(&pixels);
         }
 
-        rebuild_pl0a_indexed8_gim(&self.original, width, height, &pixels)
+        let rebuild_started = Instant::now();
+        let rebuilt = rebuild_pl0a_indexed8_gim(&self.original, width, height, &pixels)?;
+        eprintln!(
+            "[texture] rebuilt Indexed8 GIM replacement in {:?}",
+            rebuild_started.elapsed()
+        );
+        Ok(rebuilt)
     }
 }
 
@@ -175,6 +195,7 @@ fn rebuild_pl0a_indexed8_gim(
     height: usize,
     pixels: &[[u8; 4]],
 ) -> Result<Vec<u8>> {
+    let total_started = Instant::now();
     if pixels.len() != width * height {
         bail!(
             "replacement pixel count {} does not match PNG dimensions {}x{}",
@@ -198,7 +219,12 @@ fn rebuild_pl0a_indexed8_gim(
         );
     }
 
+    let layout_started = Instant::now();
     let layout = parse_pl0a_gim_layout(original)?;
+    eprintln!(
+        "[texture] parsed pl0a Indexed8 GIM layout in {:?}",
+        layout_started.elapsed()
+    );
     if layout.image_info.format != PixelFormat::Indexed8
         || !pixel_order_is_swizzled(layout.image_info.pixel_order)?
     {
@@ -224,10 +250,22 @@ fn rebuild_pl0a_indexed8_gim(
         bail!("unsupported GIM palette layout; expected pl0a-style palette offsets");
     }
 
+    let quantize_started = Instant::now();
     let quantized = quantize_indexed8_rgba5551(pixels);
+    eprintln!(
+        "[texture] quantized {} Indexed8 pixels in {:?}",
+        pixels.len(),
+        quantize_started.elapsed()
+    );
+    let swizzle_started = Instant::now();
     let swizzled_indices = swizzle(&quantized.indices, width, height, 8)?;
     let palette_bytes = encode_rgba5551(&quantized.palette);
+    eprintln!(
+        "[texture] swizzled indices and encoded palette in {:?}",
+        swizzle_started.elapsed()
+    );
 
+    let build_started = Instant::now();
     let image_pixel_size = width * height;
     let image_data_size = 0x40 + image_pixel_size;
     let image_block_size = 0x10 + image_data_size;
@@ -297,6 +335,11 @@ fn rebuild_pl0a_indexed8_gim(
     copy_image_header(original, &layout.palette_block, &mut out, palette_base)?;
     out[palette_base + 0x40..palette_base + 0x40 + palette_bytes.len()]
         .copy_from_slice(&palette_bytes);
+    eprintln!(
+        "[texture] assembled pl0a Indexed8 GIM blocks in {:?} (total {:?})",
+        build_started.elapsed(),
+        total_started.elapsed()
+    );
 
     Ok(out)
 }
@@ -512,8 +555,6 @@ struct QuantizedIndexed8 {
 }
 
 fn quantize_indexed8_rgba5551(pixels: &[[u8; 4]]) -> QuantizedIndexed8 {
-    use std::collections::BTreeMap;
-
     let mut buckets = BTreeMap::<[u8; 4], (u64, u64, u64, u64, u32)>::new();
     for [r, g, b, a] in pixels {
         let key = [
@@ -572,11 +613,53 @@ fn quantize_indexed8_rgba5551(pixels: &[[u8; 4]]) -> QuantizedIndexed8 {
         palette.push([0, 0, 0, 0]);
     }
 
+    let mut index_cache = PaletteIndexCache::default();
     let indices = pixels
         .iter()
-        .map(|pixel| nearest_palette_index(pixel, &palette))
+        .map(|pixel| index_cache.nearest_index(pixel, &palette))
         .collect::<Vec<_>>();
     QuantizedIndexed8 { indices, palette }
+}
+
+#[derive(Default)]
+struct PaletteIndexCache {
+    indices: BTreeMap<[u8; 4], u8>,
+}
+
+impl PaletteIndexCache {
+    fn nearest_index(&mut self, pixel: &[u8; 4], palette: &[[u8; 4]]) -> u8 {
+        let key = rgba5551_cache_key(pixel);
+        if let Some(index) = self.indices.get(&key) {
+            return *index;
+        }
+        let representative = rgba5551_cache_representative(&key);
+        let index = nearest_palette_index(&representative, palette);
+        self.indices.insert(key, index);
+        index
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.indices.len()
+    }
+}
+
+fn rgba5551_cache_key([r, g, b, a]: &[u8; 4]) -> [u8; 4] {
+    [
+        (*r as u16 * 31 / 255) as u8,
+        (*g as u16 * 31 / 255) as u8,
+        (*b as u16 * 31 / 255) as u8,
+        if *a >= 128 { 255 } else { 0 },
+    ]
+}
+
+fn rgba5551_cache_representative([r, g, b, a]: &[u8; 4]) -> [u8; 4] {
+    [
+        scale_bits(*r as u32, 31),
+        scale_bits(*g as u32, 31),
+        scale_bits(*b as u32, 31),
+        *a,
+    ]
 }
 
 fn nearest_palette_index(pixel: &[u8; 4], palette: &[[u8; 4]]) -> u8 {
@@ -921,6 +1004,71 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .unwrap();
         png
+    }
+
+    #[test]
+    fn indexed8_palette_index_cache_reuses_quantized_color_keys() {
+        let palette = vec![
+            [0, 0, 0, 255],
+            [8, 8, 8, 255],
+            [248, 0, 0, 255],
+            [0, 0, 0, 0],
+        ];
+        let pixels = [
+            [1, 2, 3, 200],
+            [7, 7, 7, 255],
+            [8, 8, 8, 255],
+            [15, 15, 15, 255],
+            [255, 0, 0, 255],
+        ];
+
+        let mut cache = PaletteIndexCache::default();
+        let indices = pixels
+            .iter()
+            .map(|pixel| cache.nearest_index(pixel, &palette))
+            .collect::<Vec<_>>();
+        let expected = pixels
+            .iter()
+            .map(|pixel| {
+                let key = rgba5551_cache_key(pixel);
+                nearest_palette_index(&rgba5551_cache_representative(&key), &palette)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(indices, expected);
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn indexed8_palette_cache_key_matches_rgba5551_encoder_quantization() {
+        let same_encoded_pixels = [[0, 0, 0, 255], [8, 8, 8, 255]];
+        assert_eq!(
+            encode_rgba5551(&same_encoded_pixels[0..1]),
+            encode_rgba5551(&same_encoded_pixels[1..2])
+        );
+        assert_eq!(
+            rgba5551_cache_key(&same_encoded_pixels[0]),
+            rgba5551_cache_key(&same_encoded_pixels[1])
+        );
+
+        let different_encoded_pixels = [[8, 8, 8, 255], [9, 9, 9, 255]];
+        assert_ne!(
+            encode_rgba5551(&different_encoded_pixels[0..1]),
+            encode_rgba5551(&different_encoded_pixels[1..2])
+        );
+        assert_ne!(
+            rgba5551_cache_key(&different_encoded_pixels[0]),
+            rgba5551_cache_key(&different_encoded_pixels[1])
+        );
+    }
+
+    #[test]
+    fn indexed8_palette_cache_compares_rgba5551_key_in_8bit_color_space() {
+        let palette = vec![[0, 0, 0, 255], [255, 255, 255, 255]];
+        let mut cache = PaletteIndexCache::default();
+
+        assert_eq!(cache.nearest_index(&[255, 255, 255, 255], &palette), 1);
+        assert_eq!(cache.nearest_index(&[250, 250, 250, 255], &palette), 1);
     }
 
     #[test]
