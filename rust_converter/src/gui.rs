@@ -741,13 +741,6 @@ impl GvgModdingApp {
             return;
         }
 
-        if paths_point_to_same_file(&afs_path, &output_path) {
-            self.notify_error(
-                "Choose a different output path when modified PZZ entries exist.".to_owned(),
-            );
-            return;
-        }
-
         let dirty_entries = self
             .workspace
             .dirty_pzz_entries()

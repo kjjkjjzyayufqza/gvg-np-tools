@@ -1,6 +1,6 @@
 ---
-description: cursor-tools-error
+description: 
 alwaysApply: true
 ---
 
-请不要使用cursor的grepping和search tools，请换成cmd的方式执行
+请不要使用cursor的grepping和search tools(有bug导致无限等待)，请换成cmd的方式执行
