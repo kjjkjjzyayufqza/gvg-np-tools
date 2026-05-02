@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 fn ru32(d: &[u8], o: usize) -> u32 {
     if o + 4 > d.len() {
@@ -1153,113 +1153,6 @@ fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshM
     })
 }
 
-type FaceSignature = [(i32, i32, i32); 3];
-
-fn quantize_face_position(v: &[f32; 8]) -> (i32, i32, i32) {
-    const SCALE: f32 = 1000.0;
-    (
-        (v[0] * SCALE).round() as i32,
-        (v[1] * SCALE).round() as i32,
-        (v[2] * SCALE).round() as i32,
-    )
-}
-
-fn quantize_parsed_position(v: &ParsedVertex) -> (i32, i32, i32) {
-    const SCALE: f32 = 1000.0;
-    (
-        (v.x * SCALE).round() as i32,
-        (v.y * SCALE).round() as i32,
-        (v.z * SCALE).round() as i32,
-    )
-}
-
-fn face_signature_from_points(mut points: [(i32, i32, i32); 3]) -> FaceSignature {
-    points.sort_unstable();
-    points
-}
-
-fn collect_world_face_signatures(meshes: &[BoneMeshData]) -> HashSet<FaceSignature> {
-    let mut signatures = HashSet::new();
-    for mesh in meshes {
-        for &(a, b, c) in &mesh.faces {
-            if a >= mesh.vertices.len() || b >= mesh.vertices.len() || c >= mesh.vertices.len() {
-                continue;
-            }
-            signatures.insert(face_signature_from_points([
-                quantize_parsed_position(&mesh.vertices[a]),
-                quantize_parsed_position(&mesh.vertices[b]),
-                quantize_parsed_position(&mesh.vertices[c]),
-            ]));
-        }
-    }
-    signatures
-}
-
-fn mesh_face_world_signature(
-    mesh: &BoneMeshMeta,
-    face: &[usize; 3],
-    world_matrix: &[f32],
-) -> Option<FaceSignature> {
-    let mut points = [(0, 0, 0); 3];
-    for (dst, src_idx) in points.iter_mut().zip(face.iter()) {
-        let v = mesh.local_vertices.get(*src_idx)?;
-        let (x, y, z) = transform_pt(world_matrix, v[0], v[1], v[2]);
-        let world_vertex = [x, y, z, v[3], v[4], v[5], v[6], v[7]];
-        *dst = quantize_face_position(&world_vertex);
-    }
-    Some(face_signature_from_points(points))
-}
-
-fn build_mesh_suffix_without_existing_world_faces(
-    mesh: &BoneMeshMeta,
-    face_start: usize,
-    world_matrix: &[f32],
-    existing_faces: &HashSet<FaceSignature>,
-) -> Option<BoneMeshMeta> {
-    if face_start >= mesh.faces.len() {
-        return None;
-    }
-
-    let mut remap: HashMap<usize, usize> = HashMap::new();
-    let mut local_vertices = Vec::new();
-    let mut faces = Vec::new();
-    for face in &mesh.faces[face_start..] {
-        let signature = mesh_face_world_signature(mesh, face, world_matrix)?;
-        if existing_faces.contains(&signature) {
-            continue;
-        }
-        let mut out_face = [0usize; 3];
-        for (dst, &src_idx) in out_face.iter_mut().zip(face.iter()) {
-            if src_idx >= mesh.local_vertices.len() {
-                return None;
-            }
-            let next_idx = remap.len();
-            let mapped = *remap.entry(src_idx).or_insert_with(|| {
-                local_vertices.push(mesh.local_vertices[src_idx]);
-                next_idx
-            });
-            *dst = mapped;
-        }
-        faces.push(out_face);
-    }
-
-    if faces.is_empty() {
-        return None;
-    }
-
-    Some(BoneMeshMeta {
-        bone_index: mesh.bone_index,
-        bone_name: mesh.bone_name.clone(),
-        vertex_count: local_vertices.len(),
-        face_count: faces.len(),
-        has_uv: mesh.has_uv,
-        has_normals: mesh.has_normals,
-        draw_call_vtypes: Vec::new(),
-        local_vertices,
-        faces,
-    })
-}
-
 fn encode_mesh_vertices(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Option<(u32, Vec<u8>, usize)> {
     let sx = bbox[0] / 32768.0;
     let sy = bbox[1] / 32768.0;
@@ -1652,7 +1545,6 @@ pub fn patch_pmf2_with_mesh_updates(
     }
 
     let (template_meshes, _, _, _) = extract_per_bone_meshes(template_pmf2, false);
-    let template_world_faces = collect_world_face_signatures(&template_meshes);
     let mut template_mesh_by_name: HashMap<String, &BoneMeshData> = HashMap::new();
     for bm in &template_meshes {
         template_mesh_by_name.insert(bm.bone_name.to_ascii_lowercase(), bm);
@@ -1666,7 +1558,6 @@ pub fn patch_pmf2_with_mesh_updates(
     for bm in &meta.bone_meshes {
         source_mesh_by_name.insert(bm.bone_name.to_ascii_lowercase(), bm);
     }
-    let source_world_mats = compute_world_matrices(&meta.sections);
     eprintln!("[patch-mesh] template sections: {:?}", template_sections.iter().map(|s| &s.name).collect::<Vec<_>>());
     eprintln!("[patch-mesh] source sections: {:?}", meta.sections.iter().map(|s| &s.name).collect::<Vec<_>>());
     eprintln!("[patch-mesh] source meshes: {:?}", meta.bone_meshes.iter().map(|m| (&m.bone_name, m.face_count)).collect::<Vec<_>>());
@@ -2184,7 +2075,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_append_filters_faces_that_already_exist_in_template() {
+    fn patch_rebuilds_all_source_faces_including_duplicates() {
         let template_pmf2 = template_with_custom_mesh_command();
         let mut source_mesh = test_mesh("root", 2);
         source_mesh.faces = vec![
@@ -2217,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_preserves_template_section_when_face_filter_finds_no_new_faces() {
+    fn patch_rebuilds_from_source_even_when_all_faces_are_duplicate() {
         let template_pmf2 = template_with_custom_mesh_command();
         let mut source_mesh = test_mesh("root", 2);
         source_mesh.faces = vec![
