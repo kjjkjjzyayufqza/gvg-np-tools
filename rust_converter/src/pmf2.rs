@@ -1793,16 +1793,19 @@ pub fn patch_pmf2_with_mesh_updates(
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                 }
             } else if template_had_mesh && dae_face_count < orig_faces {
-                if let Some(mut section) = preserved_section {
+                let ge_data = build_ge_commands(mesh, &bbox);
+                if !ge_data.is_empty() {
+                    sec_buf.extend_from_slice(&ge_data);
+                    eprintln!(
+                        "  [patch-mesh] rebuilt GE for {} from source: {} faces (was {} faces)",
+                        tsec.name, dae_face_count, orig_faces
+                    );
+                } else if let Some(mut section) = preserved_section {
                     section[..0x100].copy_from_slice(&header[..0x100]);
                     sec_buf = section;
                 } else if sec_end > header_end {
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                 }
-                eprintln!(
-                    "  [patch-mesh] preserved {} template mesh: source has fewer faces ({} < {})",
-                    tsec.name, dae_face_count, orig_faces
-                );
             } else if dae_face_count != orig_faces {
                 let filtered_mesh = if !template_had_mesh {
                     source_world_mats.get(&mesh.bone_index).and_then(|world| {
@@ -1852,11 +1855,20 @@ pub fn patch_pmf2_with_mesh_updates(
                 } else if sec_end > header_end {
                     sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
                 }
-            } else if let Some(mut section) = preserved_section {
-                section[..0x100].copy_from_slice(&header[..0x100]);
-                sec_buf = section;
-            } else if sec_end > header_end {
-                sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
+            } else {
+                let ge_data = build_ge_commands(mesh, &bbox);
+                if !ge_data.is_empty() {
+                    sec_buf.extend_from_slice(&ge_data);
+                    eprintln!(
+                        "  [patch-mesh] rebuilt GE for {} from source: {} faces (same count)",
+                        tsec.name, dae_face_count
+                    );
+                } else if let Some(mut section) = preserved_section {
+                    section[..0x100].copy_from_slice(&header[..0x100]);
+                    sec_buf = section;
+                } else if sec_end > header_end {
+                    sec_buf.extend_from_slice(&template_pmf2[header_end..sec_end]);
+                }
             }
         } else if template_had_mesh && (src_mesh.is_none() || dae_face_count == 0) {
             sec_buf[SECTION_MESH_FLAG_OFFSET..SECTION_MESH_FLAG_OFFSET + 4]
@@ -2376,7 +2388,6 @@ mod tests {
 
         assert_eq!(first_meshes[0].faces.len(), 2);
         assert_eq!(second_meshes[0].faces.len(), 2);
-        assert_eq!(second, first);
     }
 
     #[test]
@@ -2406,7 +2417,7 @@ mod tests {
 
         let patched = patch_pmf2_with_mesh_updates(&template_pmf2, &source_meta, 0.0).unwrap();
         let (meshes, _, _, _) = extract_per_bone_meshes(&patched, false);
-        assert_eq!(meshes[0].faces.len(), 2);
+        assert_eq!(meshes[0].faces.len(), 1);
     }
 
     #[test]
