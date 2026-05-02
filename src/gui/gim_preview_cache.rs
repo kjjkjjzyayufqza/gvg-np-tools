@@ -91,7 +91,7 @@ pub(super) fn gim_data_identity(data: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{gim_data_identity, GimPreviewCache, GimPreviewCacheKey};
+    use super::{GimPreviewCache, GimPreviewCacheKey, gim_data_identity};
 
     #[test]
     fn gim_preview_cache_key_hits_only_for_same_stream_and_revision() {

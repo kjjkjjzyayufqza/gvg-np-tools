@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- Rust 工具已编译：`rust_converter/`
+- Rust 工具已编译：根目录 Cargo project（`Cargo.toml`）
 - 原始游戏文件：`Z_DATA.BIN`
 - Inventory 文件：`data_bin_inventory/Z_DATA.BIN.inventory.json`
 - Maya（或其他 DCC）
@@ -17,7 +17,7 @@
 ## 第一步：从 Z_DATA.BIN 提取 PZZ
 
 ```bash
-cargo run --manifest-path rust_converter/Cargo.toml -- extract-pzz ^
+cargo run --bin gvg_converter -- extract-pzz ^
   "E:/research/gvg_np/Z_DATA.BIN" ^
   "E:/research/gvg_np/data_bin_inventory/Z_DATA.BIN.inventory.json" ^
   --pzz-name pl00.pzz ^
@@ -29,7 +29,7 @@ cargo run --manifest-path rust_converter/Cargo.toml -- extract-pzz ^
 ## 第二步：从 PZZ 提取 streams
 
 ```bash
-cargo run --manifest-path rust_converter/Cargo.toml -- extract-streams ^
+cargo run --bin gvg_converter -- extract-streams ^
   "E:/research/gvg_np/pipeline_out/manual_extract/pl00.pzz" ^
   --out "E:/research/gvg_np/pipeline_out/manual_extract/streams"
 ```
@@ -47,7 +47,7 @@ copy streams\stream000.pmf2 streams\stream000.pmf2.bak
 ## 第三步：PMF2 转 DAE（可导入 Maya）
 
 ```bash
-cargo run --manifest-path rust_converter/Cargo.toml -- pmf2-to-dae ^
+cargo run --bin gvg_converter -- pmf2-to-dae ^
   "E:/research/gvg_np/pipeline_out/manual_extract/streams/stream000.pmf2" ^
   --out "E:/research/gvg_np/pipeline_out/manual_extract/stream000.dae" ^
   --name stream000
@@ -76,7 +76,7 @@ cargo run --manifest-path rust_converter/Cargo.toml -- pmf2-to-dae ^
 使用 **模板模式 + 阈值过滤**，基于原始 PMF2 只回写真正改动的骨骼矩阵：
 
 ```bash
-cargo run --manifest-path rust_converter/Cargo.toml -- dae-to-pmf2 ^
+cargo run --bin gvg_converter -- dae-to-pmf2 ^
   "E:/research/gvg_np/pipeline_out/manual_extract/testout.dae" ^
   --template-pmf2 "E:/research/gvg_np/pipeline_out/manual_extract/streams/stream000.pmf2.bak" ^
   --matrix-delta-threshold 0.001 ^
@@ -86,7 +86,7 @@ cargo run --manifest-path rust_converter/Cargo.toml -- dae-to-pmf2 ^
 如果你在 Maya 中 **添加了新几何体**（如 pCube1），需要加 `--patch-mesh`：
 
 ```bash
-cargo run --manifest-path rust_converter/Cargo.toml -- dae-to-pmf2 ^
+cargo run --bin gvg_converter -- dae-to-pmf2 ^
   "E:/research/gvg_np/pipeline_out/manual_extract/testout.dae" ^
   --template-pmf2 "E:/research/gvg_np/pipeline_out/manual_extract/streams/stream000.pmf2.bak" ^
   --matrix-delta-threshold 0.001 ^
@@ -115,7 +115,7 @@ DAE 往返链路（PMF2 -> DAE -> Maya -> FBX -> Noesis -> DAE）会引入极小
 ## 第七步：重打包 PZZ
 
 ```bash
-cargo run --manifest-path rust_converter/Cargo.toml -- repack-pzz ^
+cargo run --bin gvg_converter -- repack-pzz ^
   "E:/research/gvg_np/pipeline_out/manual_extract/pl00.pzz" ^
   "E:/research/gvg_np/pipeline_out/manual_extract/streams" ^
   --out "E:/research/gvg_np/pipeline_out/manual_extract/repacked_pl00.pzz"
@@ -128,7 +128,7 @@ cargo run --manifest-path rust_converter/Cargo.toml -- repack-pzz ^
 用 `pipeline` 的 `patch` 功能，或手动用 Python 脚本将 `repacked_pl00.pzz` 写回 `Z_DATA.BIN` 的对应 entry：
 
 ```bash
-cargo run --manifest-path rust_converter/Cargo.toml -- extract-pzz ^
+cargo run --bin gvg_converter -- extract-pzz ^
   "E:/research/gvg_np/Z_DATA.BIN" ^
   "E:/research/gvg_np/data_bin_inventory/Z_DATA.BIN.inventory.json" ^
   --pzz-name pl00.pzz ^

@@ -1,7 +1,9 @@
 [package]
 name = "gvg_converter"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+default-run = "gvg_modding_tool"
+readme = "README.md"
 
 [dependencies]
 flate2 = "1"

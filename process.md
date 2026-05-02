@@ -75,7 +75,7 @@
   - `0x20..0x2B` 时间相关字段（3 x u32）
   - `0x2C..0x2F` 文件 size（与主表 size 一致）
 - 问题点：扩容后若仅更新主表 size，不更新 name table size，会形成不一致
-- 工具修复：`rust_converter/src/afs.rs::patch_afs_entry` 已在扩容分支同步更新 name table `+0x2C` size
+- 工具修复：`src/afs.rs::patch_afs_entry` 已在扩容分支同步更新 name table `+0x2C` size
 - 工具修复补充：当 `new_size <= old_size` 时也同步更新主表/name table size，避免遗留“过大 size + 尾部零填充”状态
 - 根因补充：仅更新目标 entry 的 offset/size 并把数据追加到末尾是不够的；需要在 size 变化时整体平移后续数据并批量修正后续 offsets，使布局保持连续。
 
@@ -101,7 +101,7 @@
 - 在 `afs.rs` 实现正式修复并完成离线验证：扩容后主表 size 与 name table size 已一致。
 - 在 live 文件上完成实测写入校验：`pl0al_testout_repacked.pzz` 与从 live 回读的 `pl0al.pzz` 哈希一致。
 - 通过 IDA (`sub_8823A2C/sub_8821370`) 识别出 AFS mode0 的连续布局假设。
-- `rust_converter/src/afs.rs` 已升级为“size 变化时重排后续数据 + 修正后续 offsets + 修正 name table 指针/size”的实现。
+- `src/afs.rs` 已升级为“size 变化时重排后续数据 + 修正后续 offsets + 修正 name table 指针/size”的实现。
 - 新发现关键细节：AFS 后续偏移推进单位是 `ceil(size/2048)*2048`，不是原始 byte size。
 - 修复 `patch_afs_entry`：size 变化时按 2048 对齐区间替换 entry，后续 offsets/name table 偏移按“扇区对齐 delta”平移；并对 entry 尾部自动补零到 2048 对齐。
 - 本地一致性校验通过：`zdata_testout_contiguous_v2.bin` 全表满足连续链（`bad_count=0`），且 `pl0al` 主表 size 与 name table `+0x2C` size 一致。

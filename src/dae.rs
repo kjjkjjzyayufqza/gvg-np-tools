@@ -1,8 +1,8 @@
 use crate::pmf2::{
-    compute_auto_bbox_from_bone_meshes, compute_world_matrices, BoneMeshData, BoneMeshMeta,
-    BoneSection, Pmf2Meta,
+    BoneMeshData, BoneMeshMeta, BoneSection, Pmf2Meta, compute_auto_bbox_from_bone_meshes,
+    compute_world_matrices,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;

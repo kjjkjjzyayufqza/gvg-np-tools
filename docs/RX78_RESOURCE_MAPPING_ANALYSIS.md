@@ -1053,7 +1053,7 @@ The earlier extractor failed on `pbg*.pzz` because those PZZ files use:
 entry_count = 1
 ```
 
-The Rust key finder previously searched from `2..200`, so it skipped valid single-stream PZZ files. This has been fixed in `rust_converter/src/pzz.rs` by starting at `1`.
+The Rust key finder previously searched from `2..200`, so it skipped valid single-stream PZZ files. This has been fixed in `src/pzz.rs` by starting at `1`.
 
 `pbg000.pzz` and `pbg001.pzz` both extract as a single GIM stream:
 

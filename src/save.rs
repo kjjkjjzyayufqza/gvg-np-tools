@@ -3,7 +3,7 @@ use crate::{
     pzz,
     workspace::PzzWorkspace,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::time::Instant;
 
 #[derive(Clone, Debug)]

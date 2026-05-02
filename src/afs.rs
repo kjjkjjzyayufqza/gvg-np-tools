@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -11,11 +11,7 @@ fn ru32(d: &[u8], o: usize) -> u32 {
 }
 
 fn align_up(v: usize, a: usize) -> usize {
-    if a == 0 {
-        v
-    } else {
-        (v + a - 1) & !(a - 1)
-    }
+    if a == 0 { v } else { (v + a - 1) & !(a - 1) }
 }
 
 #[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq)]

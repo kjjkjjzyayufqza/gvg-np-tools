@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::{collections::BTreeMap, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1344,9 +1344,17 @@ mod tests {
         let block_03_size = 0x10 + image_block_size + 0x250;
         let block_02_size = 0x10 + block_03_size;
         assert_eq!(ru32(&rebuilt, 0x14).unwrap() as usize, block_02_size);
-        assert_eq!(ru32(&rebuilt, 0x18).unwrap(), 0x10, "root block offset+8 must be data_offset for game child iteration");
+        assert_eq!(
+            ru32(&rebuilt, 0x18).unwrap(),
+            0x10,
+            "root block offset+8 must be data_offset for game child iteration"
+        );
         assert_eq!(ru32(&rebuilt, 0x24).unwrap() as usize, block_03_size);
-        assert_eq!(ru32(&rebuilt, 0x28).unwrap(), 0x10, "picture block offset+8 must be data_offset for game child iteration");
+        assert_eq!(
+            ru32(&rebuilt, 0x28).unwrap(),
+            0x10,
+            "picture block offset+8 must be data_offset for game child iteration"
+        );
         assert_eq!(ru32(&rebuilt, 0x34).unwrap() as usize, image_block_size);
         assert_eq!(ru32(&rebuilt, 0x38).unwrap() as usize, image_block_size);
         assert_eq!(ru16(&rebuilt, 0x48).unwrap(), 32);
@@ -1388,13 +1396,15 @@ mod tests {
         assert_eq!(ru16(&rebuilt, 0x50).unwrap(), ru16(&gim, 0x50).unwrap());
         assert_eq!(ru32(&rebuilt, 0x60).unwrap() as usize, image_data_size);
         assert_eq!(rebuilt.len(), 0x10 + block_02_size);
-        assert!(find_image_info(
-            &rebuilt,
-            &find_blocks(&rebuilt, 0x10, rebuilt.len()).unwrap(),
-            0x05
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            find_image_info(
+                &rebuilt,
+                &find_blocks(&rebuilt, 0x10, rebuilt.len()).unwrap(),
+                0x05
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
@@ -1490,5 +1500,4 @@ mod tests {
         assert_eq!(third_image.metadata.height, 8);
         assert_eq!(third_image.metadata.format, PixelFormat::Rgba4444);
     }
-
 }

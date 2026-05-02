@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -156,13 +156,8 @@ impl VtypeInfo {
 
     pub fn vertex_size(&self) -> usize {
         let cs = |f: u8| -> usize { [0, 1, 2, 4][f as usize & 3] };
-        let align = |v: usize, a: usize| -> usize {
-            if a <= 1 {
-                v
-            } else {
-                (v + a - 1) & !(a - 1)
-            }
-        };
+        let align =
+            |v: usize, a: usize| -> usize { if a <= 1 { v } else { (v + a - 1) & !(a - 1) } };
         let mut sz = 0usize;
         if self.wt_fmt > 0 {
             let w = cs(self.wt_fmt);
@@ -215,13 +210,7 @@ fn decode_vertex(data: &[u8], offset: usize, vt: &VtypeInfo) -> Option<ParsedVer
     }
     let mut pv = ParsedVertex::default();
     let cs = |f: u8| -> usize { [0, 1, 2, 4][f as usize & 3] };
-    let align = |v: usize, a: usize| -> usize {
-        if a <= 1 {
-            v
-        } else {
-            (v + a - 1) & !(a - 1)
-        }
-    };
+    let align = |v: usize, a: usize| -> usize { if a <= 1 { v } else { (v + a - 1) & !(a - 1) } };
     let mut o = offset;
 
     if vt.wt_fmt > 0 {
@@ -310,13 +299,7 @@ fn decode_vertex(data: &[u8], offset: usize, vt: &VtypeInfo) -> Option<ParsedVer
 
 fn vertex_position_field_offset(offset: usize, vt: &VtypeInfo) -> Option<(usize, usize)> {
     let cs = |f: u8| -> usize { [0, 1, 2, 4][f as usize & 3] };
-    let align = |v: usize, a: usize| -> usize {
-        if a <= 1 {
-            v
-        } else {
-            (v + a - 1) & !(a - 1)
-        }
-    };
+    let align = |v: usize, a: usize| -> usize { if a <= 1 { v } else { (v + a - 1) & !(a - 1) } };
     let mut o = offset;
 
     if vt.wt_fmt > 0 {
@@ -979,6 +962,7 @@ fn wrap_texture_coord(value: f32) -> f32 {
 
 type EncodedVertex = (i16, i16, i16, i16, i16, i16, i16, i16);
 const MAX_TRIANGLE_PRIM_VERTICES: usize = 0xFFFC;
+#[cfg(test)]
 const APPENDED_TRIANGLE_PRIM_VERTICES: usize = 96;
 
 fn triangle_prim_chunks(vertex_count: usize) -> Vec<(usize, usize)> {
@@ -1116,6 +1100,7 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
     ge
 }
 
+#[cfg(test)]
 fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshMeta> {
     if face_start >= mesh.faces.len() {
         return None;
@@ -1153,6 +1138,7 @@ fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshM
     })
 }
 
+#[cfg(test)]
 fn encode_mesh_vertices(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Option<(u32, Vec<u8>, usize)> {
     let sx = bbox[0] / 32768.0;
     let sy = bbox[1] / 32768.0;
@@ -1229,6 +1215,7 @@ fn encode_mesh_vertices(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Option<(u32, Ve
     Some((vtype, vert_buf, seq_verts.len()))
 }
 
+#[cfg(test)]
 fn append_mesh_draw_to_template_section(
     template_section: &[u8],
     origin_rel: usize,
@@ -1558,9 +1545,24 @@ pub fn patch_pmf2_with_mesh_updates(
     for bm in &meta.bone_meshes {
         source_mesh_by_name.insert(bm.bone_name.to_ascii_lowercase(), bm);
     }
-    eprintln!("[patch-mesh] template sections: {:?}", template_sections.iter().map(|s| &s.name).collect::<Vec<_>>());
-    eprintln!("[patch-mesh] source sections: {:?}", meta.sections.iter().map(|s| &s.name).collect::<Vec<_>>());
-    eprintln!("[patch-mesh] source meshes: {:?}", meta.bone_meshes.iter().map(|m| (&m.bone_name, m.face_count)).collect::<Vec<_>>());
+    eprintln!(
+        "[patch-mesh] template sections: {:?}",
+        template_sections
+            .iter()
+            .map(|s| &s.name)
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "[patch-mesh] source sections: {:?}",
+        meta.sections.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    eprintln!(
+        "[patch-mesh] source meshes: {:?}",
+        meta.bone_meshes
+            .iter()
+            .map(|m| (&m.bone_name, m.face_count))
+            .collect::<Vec<_>>()
+    );
 
     let mut bbox = compute_auto_bbox_from_bone_meshes(&meta.bone_meshes).unwrap_or(template_bbox);
     for axis in 0..3 {
@@ -2500,10 +2502,12 @@ mod tests {
         let mut edit = Pmf2MetadataEdit::from_pmf2(&pmf2).unwrap();
         edit.sections[0].name = "this_name_is_too_long".to_string();
 
-        assert!(apply_pmf2_metadata_edit(&pmf2, &edit)
-            .unwrap_err()
-            .to_string()
-            .contains("must fit in 15 ASCII bytes"));
+        assert!(
+            apply_pmf2_metadata_edit(&pmf2, &edit)
+                .unwrap_err()
+                .to_string()
+                .contains("must fit in 15 ASCII bytes")
+        );
     }
 
     #[test]
@@ -2529,10 +2533,12 @@ mod tests {
         let mut edit = Pmf2MetadataEdit::from_pmf2(&pmf2).unwrap();
         edit.sections[0].name = "root\0tail".to_string();
 
-        assert!(apply_pmf2_metadata_edit(&pmf2, &edit)
-            .unwrap_err()
-            .to_string()
-            .contains("must not contain control characters"));
+        assert!(
+            apply_pmf2_metadata_edit(&pmf2, &edit)
+                .unwrap_err()
+                .to_string()
+                .contains("must not contain control characters")
+        );
     }
 
     #[test]
@@ -2558,10 +2564,12 @@ mod tests {
         let mut edit = Pmf2MetadataEdit::from_pmf2(&pmf2).unwrap();
         edit.sections[0].parent = 0;
 
-        assert!(apply_pmf2_metadata_edit(&pmf2, &edit)
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be its own parent"));
+        assert!(
+            apply_pmf2_metadata_edit(&pmf2, &edit)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be its own parent")
+        );
     }
 
     #[test]

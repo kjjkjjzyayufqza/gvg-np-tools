@@ -2,8 +2,8 @@
 //! (e.g. localized Windows IO errors) render instead of tofu.
 
 use egui::{
-    epaint::text::{FontData, FontFamily, FontInsert, FontPriority, InsertFontFamily},
     Context,
+    epaint::text::{FontData, FontFamily, FontInsert, FontPriority, InsertFontFamily},
 };
 use std::path::{Path, PathBuf};
 

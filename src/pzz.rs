@@ -1,7 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
+use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use std::io::{Read, Write};
 
 pub fn xor_decrypt(data: &[u8], key: u32) -> Vec<u8> {
@@ -36,11 +36,7 @@ fn rb32(d: &[u8], o: usize) -> u32 {
 }
 
 fn align_up(v: usize, a: usize) -> usize {
-    if a == 0 {
-        v
-    } else {
-        (v + a - 1) & !(a - 1)
-    }
+    if a == 0 { v } else { (v + a - 1) & !(a - 1) }
 }
 
 #[derive(Clone)]

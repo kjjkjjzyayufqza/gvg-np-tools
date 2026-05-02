@@ -1,7 +1,7 @@
-use super::gim_preview_cache::{gim_data_identity, GimPreviewCache, GimPreviewCacheKey};
+use super::gim_preview_cache::{GimPreviewCache, GimPreviewCacheKey, gim_data_identity};
 use crate::{
     pmf2, pzz,
-    save::{rebuild_pzz_payload, rebuild_pzz_payload_cached, PzzSavePlan, PzzSavePlanner},
+    save::{PzzSavePlan, PzzSavePlanner, rebuild_pzz_payload, rebuild_pzz_payload_cached},
     texture::{GimImage, GimReplaceFormat},
     workspace::{EntryValidation, ModWorkspace},
 };
@@ -1183,7 +1183,10 @@ _L 0x20AAAAAA 0xBBBBBBBB\n";
         assert!(text.contains("PMF2 Modding - Skip Display List Overflow Hang"));
         assert!(text.contains("0x211BD060"));
         let pmf2_count = text.matches("PMF2 Modding").count();
-        assert_eq!(pmf2_count, 1, "PMF2 cheat should appear exactly once, found {pmf2_count}");
+        assert_eq!(
+            pmf2_count, 1,
+            "PMF2 cheat should appear exactly once, found {pmf2_count}"
+        );
 
         assert!(text.contains("PZZ Modding - Force verify pass"));
     }

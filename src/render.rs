@@ -1,5 +1,5 @@
 use crate::pmf2::{BoneMeshData, Pmf2Meta};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

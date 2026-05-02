@@ -2,7 +2,7 @@ use crate::{
     afs::{self, AfsEntry},
     pzz,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

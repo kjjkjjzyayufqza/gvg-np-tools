@@ -1,5 +1,5 @@
 use gvg_converter::{
-    afs::{patch_entry_bytes, plan_patch_entry, AfsEntry, AfsInventory},
+    afs::{AfsEntry, AfsInventory, patch_entry_bytes, plan_patch_entry},
     pmf2::{BoneMeshData, ParsedVertex},
     pzz::{build_pzz, build_pzz_with_tail, compute_pzz_tail, inspect_pzz},
     render::{Pmf2PreviewMesh, PreviewCamera, PreviewViewport, PreviewVisibility},
@@ -188,10 +188,12 @@ fn afs_patch_bytes_updates_tables_and_name_size_mirror() {
 fn afs_patch_rejects_invalid_or_truncated_sources() {
     let mut invalid_magic = make_afs(&[("pl00.pzz", b"old")]);
     invalid_magic[0..4].copy_from_slice(b"BAD!");
-    assert!(patch_entry_bytes(&invalid_magic, 0, b"new")
-        .unwrap_err()
-        .to_string()
-        .contains("unsupported AFS magic"));
+    assert!(
+        patch_entry_bytes(&invalid_magic, 0, b"new")
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported AFS magic")
+    );
 
     let truncated = make_afs(&[("pl00.pzz", b"old")])[..12].to_vec();
     assert!(patch_entry_bytes(&truncated, 0, b"new").is_err());
@@ -247,10 +249,12 @@ fn save_planners_report_pzz_tail_and_afs_alignment_changes() {
     let save_plan = AfsSavePlanner::new(inventory, 0, pzz_plan.rebuilt_pzz.len())
         .plan()
         .unwrap();
-    assert!(save_plan
-        .validation_messages
-        .iter()
-        .any(|m| m.contains("2048-byte aligned")));
+    assert!(
+        save_plan
+            .validation_messages
+            .iter()
+            .any(|m| m.contains("2048-byte aligned"))
+    );
 }
 
 #[test]
@@ -403,10 +407,12 @@ fn pmf2_preview_projects_visible_triangles_axes_and_bounds() {
     assert_eq!(projected.triangles.len(), 1);
     assert_eq!(projected.axes.len(), 3);
     assert_eq!(projected.bounds.len(), 12);
-    assert!(projected.triangles[0]
-        .points
-        .iter()
-        .all(|p| p[0] >= 0.0 && p[0] <= viewport.width && p[1] >= 0.0 && p[1] <= viewport.height));
+    assert!(
+        projected.triangles[0].points.iter().all(|p| p[0] >= 0.0
+            && p[0] <= viewport.width
+            && p[1] >= 0.0
+            && p[1] <= viewport.height)
+    );
 }
 
 #[test]

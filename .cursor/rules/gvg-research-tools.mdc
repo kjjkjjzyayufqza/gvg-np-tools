@@ -1,0 +1,57 @@
+---
+description: GVG research tools mandatory project context and session logging
+alwaysApply: true
+---
+
+# GVG Research Tools Rule
+
+This Cursor rule is AI-only guidance for this repository. The cross-agent hub is
+`AGENTS.md`; read it before starting any task and keep this rule linked with it.
+
+## Mandatory Startup
+
+Before making code, asset, documentation, or command changes:
+
+1. Read `AGENTS.md`.
+2. Search `docs/` for Markdown files related to the user's task.
+3. Read the relevant research notes and approved specs before editing.
+4. Create or update `docs/agent-sessions/<topic>/todo.md`.
+5. Create or update `docs/agent-sessions/<topic>/process.md`.
+
+Use a short kebab-case topic folder. Reuse an existing topic folder when it
+matches the current task.
+
+## Project Context
+
+This is a research and tooling repo for **Mobile Suit Gundam: Gundam vs. Gundam
+Next Plus** (`ガンダムVS.ガンダムNEXT PLUS`). The work centers on `Z_DATA.BIN`,
+AFS, PZZ, PMF2, GIM, DAE/FBX workflows, PPSSPP runtime behavior, and reverse
+engineering notes.
+
+Use `docs/` as the first source of truth. Especially check:
+
+- `docs/MOD_WORKFLOW.md`
+- `docs/RUST_DAE_PMF2_COMMANDS.md`
+- `docs/PMF2_TODO.md`
+- `docs/PMF2_M00_RENDER_ANALYSIS.md`
+- `docs/PMF2_SPECIAL_SECTIONS_ANALYSIS.md`
+- `docs/GIM_REPLACE_NOTES.md`
+- `docs/PPSSPP_OPERATION_ANALYSIS.md`
+- `docs/superpowers/specs/`
+
+## Link Policy
+
+- `AGENTS.md` is the hub for all AI rules and skills.
+- This rule links to `AGENTS.md`; `AGENTS.md` links back to this rule.
+- Any future project rule or skill must link back to `AGENTS.md`.
+- Any future project `SKILL.md` must also link to related rules and session
+  process files when relevant.
+
+## Search And Safety
+
+- Avoid Cursor internal search/grep for broad searches in this workspace because
+  the project has seen hanging behavior. Prefer shell-based `git grep`,
+  `git ls-files`, and PowerShell commands.
+- Preserve original binary assets unless the user explicitly asks for a change.
+- Document commands, failures, skipped checks, and handoff notes in the active
+  `process.md`.

@@ -120,11 +120,7 @@ pub fn show_asset_tree(
                     } => {
                         let selected = state.selected_afs_entry == Some(*index);
                         let expand_icon = if *kind == AssetKind::Pzz {
-                            if *is_expanded {
-                                "▼ "
-                            } else {
-                                "▶ "
-                            }
+                            if *is_expanded { "▼ " } else { "▶ " }
                         } else {
                             "  "
                         };

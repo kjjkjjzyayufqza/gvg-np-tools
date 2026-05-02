@@ -1,9 +1,9 @@
 ---
 name: gvg modding tool
-overview: 設計一個 Rust/egui 原生桌面 GVG modding 工具，覆蓋 AFS/Z_DATA.BIN 導入、PZZ stream tree、PMF2 metadata/data/3D preview、GIM preview/replace，以及分層保存 PZZ/AFS 的完整工作流。實作會分階段落地，先復用現有 `rust_converter` 的可靠格式邏輯，再新增 GUI、資產工作區與渲染層。
+overview: 設計一個 Rust/egui 原生桌面 GVG modding 工具，覆蓋 AFS/Z_DATA.BIN 導入、PZZ stream tree、PMF2 metadata/data/3D preview、GIM preview/replace，以及分層保存 PZZ/AFS 的完整工作流。實作會分階段落地，先復用根目录 Cargo crate 的可靠格式邏輯，再新增 GUI、資產工作區與渲染層。
 todos:
   - id: core-library-split
-    content: Plan the split from CLI-only rust_converter modules into a reusable core library shared by CLI and GUI
+    content: Plan the split from CLI-only root Cargo modules into a reusable core library shared by CLI and GUI
     status: completed
   - id: workspace-model
     content: Design AFS/PZZ/stream/asset workspace state with dirty tracking, operation log, and validation results
@@ -27,10 +27,10 @@ isProject: false
 
 ## 已確認的基礎
 
-- 現有 CLI 已提供核心格式能力：[rust_converter/src/main.rs](e:/research/gvg_np/rust_converter/src/main.rs) 包含 `ExtractPzz`、`ExtractStreams`、`Pmf2ToDae`、`DaeToPmf2`、`RepackPzz`、`PatchAfs`、`Pipeline` 等流程。
-- PMF2 的主資料模型可復用：[rust_converter/src/pmf2.rs](e:/research/gvg_np/rust_converter/src/pmf2.rs) 已有 `Pmf2Meta`、`rebuild_pmf2`、`patch_pmf2_with_mesh_updates`、transform patch 與 bbox 重算邏輯。
-- PZZ 已有完整性處理基礎：[rust_converter/src/pzz.rs](e:/research/gvg_np/rust_converter/src/pzz.rs) 已包含 `extract_pzz_streams`、`rebuild_pzz_from_original`、`compute_pzz_tail`。
-- AFS 目前偏向替換既有 entry：[rust_converter/src/afs.rs](e:/research/gvg_np/rust_converter/src/afs.rs) 有 `patch_afs_entry`，但完整新增 AFS 檔案數量需要更嚴格處理主表、name table、2048 對齊與 inventory 重建。
+- 現有 CLI 已提供核心格式能力：[src/main.rs](e:/research/gvg_np/src/main.rs) 包含 `ExtractPzz`、`ExtractStreams`、`Pmf2ToDae`、`DaeToPmf2`、`RepackPzz`、`PatchAfs`、`Pipeline` 等流程。
+- PMF2 的主資料模型可復用：[src/pmf2.rs](e:/research/gvg_np/src/pmf2.rs) 已有 `Pmf2Meta`、`rebuild_pmf2`、`patch_pmf2_with_mesh_updates`、transform patch 與 bbox 重算邏輯。
+- PZZ 已有完整性處理基礎：[src/pzz.rs](e:/research/gvg_np/src/pzz.rs) 已包含 `extract_pzz_streams`、`rebuild_pzz_from_original`、`compute_pzz_tail`。
+- AFS 目前偏向替換既有 entry：[src/afs.rs](e:/research/gvg_np/src/afs.rs) 有 `patch_afs_entry`，但完整新增 AFS 檔案數量需要更嚴格處理主表、name table、2048 對齊與 inventory 重建。
 - UI 技術參考：`egui` 適合用 `SidePanel`、`TopBottomPanel`、`CentralPanel`、`ScrollArea`、`CollapsingHeader` 建主介面；`egui_dock` 可提供可停靠 tab workspace。`ssbh_editor` 的 [E:/research/ssbh_editor/src/app.rs](E:/research/ssbh_editor/src/app.rs) 類似使用 left file list、right inspector、central 3D viewport，並透過 `egui_wgpu::Callback` 嵌入 wgpu render。
 
 ## 三種設計路線
@@ -89,7 +89,7 @@ flowchart LR
 
 ## 分階段落地
 
-1. **Core library split**：把 `rust_converter` 的格式模組抽成可被 CLI 和 GUI 共用的 crate，保持 CLI 行為不變。
+1. **Core library split**：整理根目录 Cargo crate 的格式模組，让 CLI 和 GUI 共用，保持 CLI 行為不變。
 2. **Workspace model**：建立 AFS/PZZ/stream/asset node state、dirty tracking、operation log、validation result。
 3. **egui shell**：搭建 top/left/center/right/bottom layout，先顯示 virtual AFS list 和 PZZ stream tree。
 4. **PMF2 editor foundation**：接入 PMF2 metadata/data view、DAE export/import/replace、template patch options。

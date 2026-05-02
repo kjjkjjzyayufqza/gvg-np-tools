@@ -1,4 +1,4 @@
-use super::gim_preview_cache::{gim_data_identity, GimPreviewCache, GimPreviewCacheKey};
+use super::gim_preview_cache::{GimPreviewCache, GimPreviewCacheKey, gim_data_identity};
 use crate::{
     pmf2, pzz,
     workspace::{AssetKind, EntryValidation, ModWorkspace},
