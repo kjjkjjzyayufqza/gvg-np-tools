@@ -599,7 +599,8 @@ fn build_uniforms(camera: &PreviewCamera, vw: u32, vh: u32, has_texture: bool) -
     let aspect = vw as f32 / vh.max(1) as f32;
     let view = look_at(camera);
     let proj = perspective(camera.fov_y_radians, aspect, camera.near, camera.far);
-    let model = mat4_identity();
+    let mut model = mat4_identity();
+    model[0][0] = -1.0;
     let mvp = mat4_mul(model, mat4_mul(view, proj));
 
     let cos_p = camera.pitch.cos();
