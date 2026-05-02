@@ -950,31 +950,32 @@ pub(crate) fn update_cwcheat_body_sizes(
     let mut header_lines: Vec<String> = Vec::new();
     let mut other_groups: Vec<Vec<String>> = Vec::new();
     let mut current_group: Vec<String> = Vec::new();
-    let mut current_is_pzz_modding = false;
+    let mut current_is_managed = false;
 
     for line in current_text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("_S ") || trimmed.starts_with("_G ") {
             if !current_group.is_empty() {
-                if !current_is_pzz_modding {
+                if !current_is_managed {
                     other_groups.push(std::mem::take(&mut current_group));
                 } else {
                     current_group.clear();
                 }
             }
             header_lines.push(line.to_string());
-            current_is_pzz_modding = false;
+            current_is_managed = false;
             continue;
         }
         if trimmed.starts_with("_C") {
             if !current_group.is_empty() {
-                if !current_is_pzz_modding {
+                if !current_is_managed {
                     other_groups.push(std::mem::take(&mut current_group));
                 } else {
                     current_group.clear();
                 }
             }
-            current_is_pzz_modding = trimmed.contains("PZZ Modding");
+            current_is_managed =
+                trimmed.contains("PZZ Modding") || trimmed.contains("PMF2 Modding");
             current_group.push(line.to_string());
         } else if trimmed.starts_with("_L ") {
             current_group.push(line.to_string());
@@ -986,7 +987,7 @@ pub(crate) fn update_cwcheat_body_sizes(
             }
         }
     }
-    if !current_group.is_empty() && !current_is_pzz_modding {
+    if !current_group.is_empty() && !current_is_managed {
         other_groups.push(current_group);
     }
 
@@ -1016,6 +1017,9 @@ pub(crate) fn update_cwcheat_body_sizes(
     output.push_str("_C1 PZZ Modding - Force verify pass (keep decryption)\n");
     output.push_str("_L 0x200BD550 0x24020001\n");
     output.push_str("_L 0x200BD554 0x00000000\n");
+
+    output.push_str("_C1 PMF2 Modding - Skip Display List Overflow Hang\n");
+    output.push_str("_L 0x211BD060 0x00000000\n");
 
     // Generate body_size overrides for ALL entries in the AFS — the entire
     // EBOOT ROM table (dword_8A56160[2651]).  Every Z_DATA entry has a
@@ -1148,5 +1152,39 @@ mod tests {
 
         assert!(text.contains(&format!("0x{:08X}", exact_body_size)));
         assert!(!text.contains(&format!("0x{:08X}", rebuilt.len().saturating_sub(16))));
+    }
+
+    #[test]
+    fn update_preserves_user_cheats_and_adds_pmf2_overflow_fix() {
+        let original_pzz = pzz::build_pzz(&[b"MIG.00.1PSP_original".to_vec()], 0x1234_5678);
+        let afs = make_afs(&[("pl0a.pzz", &original_pzz)]);
+        let mut workspace = ModWorkspace::open_afs_bytes("Z_DATA.BIN", afs).unwrap();
+
+        let existing = "\
+_S NPJH50107\n\
+_G Gundam vs Gundam NEXT PLUS\n\
+_C1 My Custom Cheat\n\
+_L 0x20123456 0xDEADBEEF\n\
+_C1 PZZ Modding - Force verify pass (keep decryption)\n\
+_L 0x200BD550 0x24020001\n\
+_L 0x200BD554 0x00000000\n\
+_C1 PMF2 Modding - Skip Display List Overflow Hang\n\
+_L 0x211BD060 0x00000000\n\
+_C1 Another User Cheat\n\
+_L 0x20AAAAAA 0xBBBBBBBB\n";
+
+        let (text, _) = update_cwcheat_body_sizes(existing, &mut workspace).unwrap();
+
+        assert!(text.contains("My Custom Cheat"));
+        assert!(text.contains("0xDEADBEEF"));
+        assert!(text.contains("Another User Cheat"));
+        assert!(text.contains("0xBBBBBBBB"));
+
+        assert!(text.contains("PMF2 Modding - Skip Display List Overflow Hang"));
+        assert!(text.contains("0x211BD060"));
+        let pmf2_count = text.matches("PMF2 Modding").count();
+        assert_eq!(pmf2_count, 1, "PMF2 cheat should appear exactly once, found {pmf2_count}");
+
+        assert!(text.contains("PZZ Modding - Force verify pass"));
     }
 }
