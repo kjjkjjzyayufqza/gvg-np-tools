@@ -1,8 +1,8 @@
 """
 Maya 2026 Python Script
 - Step 1: Log all scene assets
-- Step 2: Find mesh named 'ms'
-- Step 3: Split 'ms' into separate meshes based on dominant skin weights
+- Step 2: Find all non-intermediate meshes
+- Step 3: Split each mesh into separate meshes based on dominant skin weights
 
 Usage: Copy/paste into Maya Script Editor (Python tab) and run.
 """
@@ -77,7 +77,54 @@ def log_scene_assets():
     print("=" * 70 + "\n")
 
 
-# ─── Step 2: Find Mesh ──────────────────────────────────────────────
+# ─── Step 2: Find Meshes ─────────────────────────────────────────────
+
+def _short_node_name(node):
+    """Return the display name from a Maya DAG path."""
+    return node.rsplit("|", 1)[-1]
+
+
+def _safe_node_name(node):
+    """Return a duplicate-safe base name for generated mesh transforms."""
+    return _short_node_name(node).replace(":", "_").replace(" ", "_")
+
+
+def list_all_meshes():
+    """
+    Locate all non-intermediate mesh shapes in the scene.
+    Returns a list of (transform, shape) pairs.
+    """
+    result = []
+    seen_transforms = set()
+    mesh_shapes = cmds.ls(type="mesh", long=True) or []
+
+    for shape in mesh_shapes:
+        try:
+            if cmds.getAttr("{0}.intermediateObject".format(shape)):
+                continue
+        except Exception:
+            continue
+
+        parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
+        if not parents:
+            continue
+
+        transform = parents[0]
+        if transform in seen_transforms:
+            cmds.warning("Multiple non-intermediate mesh shapes found under '{0}'. "
+                         "Only the first one will be split.".format(transform))
+            continue
+
+        seen_transforms.add(transform)
+        result.append((transform, shape))
+
+    print("[list_all_meshes] Found {0} non-intermediate mesh transform(s).".format(
+        len(result)))
+    for transform, shape in result:
+        print("    transform='{0}', shape='{1}'".format(transform, shape))
+
+    return result
+
 
 def find_mesh(name):
     """
@@ -309,8 +356,8 @@ def split_mesh_by_weights(transform, shape):
     influences = cmds.skinCluster(skin, q=True, influence=True) or []
     print("[split] {0} influences: {1}".format(len(influences), influences))
 
-    num_verts = cmds.polyEvaluate(transform, vertex=True)
-    num_faces = cmds.polyEvaluate(transform, face=True)
+    num_verts = cmds.polyEvaluate(shape, vertex=True)
+    num_faces = cmds.polyEvaluate(shape, face=True)
     print("[split] {0} vertices, {1} faces".format(num_verts, num_faces))
 
     print("[split] Querying weights via API 2.0 ...")
@@ -341,7 +388,7 @@ def split_mesh_by_weights(transform, shape):
         print("[split] WARNING: Could not read bind pose. "
               "Meshes will be in current (deformed) pose.")
 
-    cmds.undoInfo(openChunk=True, chunkName="split_ms_by_weights")
+    cmds.undoInfo(openChunk=True, chunkName="split_mesh_by_weights")
     created = []
     try:
         for inf, keep_faces in face_groups.items():
@@ -349,7 +396,7 @@ def split_mesh_by_weights(transform, shape):
                 continue
 
             safe = inf.replace("|", "_").replace(":", "_")
-            dup_name = "{0}__{1}".format(transform, safe)
+            dup_name = "{0}__{1}".format(_safe_node_name(transform), safe)
             dup = cmds.duplicate(transform, name=dup_name, renameChildren=True)[0]
 
             dup_skin = _get_skin_cluster(dup)
@@ -390,16 +437,22 @@ def main():
     # Step 1: list everything in the scene
     log_scene_assets()
 
-    # Step 2: locate mesh "ms"
-    print(">>> Step 2: Searching for mesh 'ms' ...")
-    transform, shape = find_mesh("ms")
-    if not transform:
-        cmds.warning("Mesh 'ms' not found in scene! Aborting.")
+    # Step 2: locate every non-intermediate mesh in the scene
+    print(">>> Step 2: Searching for all non-intermediate meshes ...")
+    meshes = list_all_meshes()
+    if not meshes:
+        cmds.warning("No non-intermediate meshes found in scene! Aborting.")
         return
 
-    # Step 3: split by dominant skin weight
-    print(">>> Step 3: Splitting by skin weights ...")
-    split_mesh_by_weights(transform, shape)
+    # Step 3: split each mesh by dominant skin weight
+    print(">>> Step 3: Splitting {0} mesh(es) by skin weights ...".format(len(meshes)))
+    created = []
+    for index, (transform, shape) in enumerate(meshes, 1):
+        print("\n>>> Mesh {0}/{1}: '{2}'".format(index, len(meshes), transform))
+        created.extend(split_mesh_by_weights(transform, shape))
+
+    print(">>> Finished. Created {0} split mesh(es) from {1} source mesh(es).".format(
+        len(created), len(meshes)))
 
 
 main()
