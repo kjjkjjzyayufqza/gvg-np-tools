@@ -19,3 +19,6 @@ debug/
 target/
 **/*.rs.bk
 *.pdb
+
+test.fbx
+testout.dae
