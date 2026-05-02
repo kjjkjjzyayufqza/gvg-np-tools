@@ -135,7 +135,7 @@ impl PreviewCamera {
         let fov_y_radians = 45.0_f32.to_radians();
         Self {
             target: center,
-            yaw: std::f32::consts::PI + 0.35,
+            yaw: 0.35,
             pitch: 0.35,
             distance: (radius / (fov_y_radians * 0.5).tan()).max(2.0),
             fov_y_radians,

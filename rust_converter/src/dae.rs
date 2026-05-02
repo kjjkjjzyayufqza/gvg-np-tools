@@ -35,12 +35,22 @@ pub fn write_dae(
     let mut controller_nodes = Vec::new();
     let section_by_index: HashMap<usize, &BoneSection> =
         sections.iter().map(|s| (s.index, s)).collect();
-    let inv_bind_by_section: HashMap<usize, [f64; 16]> = HashMap::new();
+    let world_mats = if sections.is_empty() {
+        HashMap::new()
+    } else {
+        compute_world_matrices(sections)
+    };
+    let mut inv_bind_by_section: HashMap<usize, [f64; 16]> = HashMap::new();
+    for (idx, wm) in world_mats {
+        let converted = convert_coord_matrix(&wm);
+        let inv = invert_affine_row_major(&converted).unwrap_or(IDENTITY_F64);
+        inv_bind_by_section.insert(idx, inv);
+    }
 
     for (mesh_idx, mesh) in bone_meshes.iter().enumerate() {
         let geom_id = format!("geom_{}_{}", mesh_idx, mesh.bone_index);
         let geom_name = escape_xml(&format!("{}_{}", mesh.bone_name, mesh_idx));
-        let src_verts = &mesh.local_vertices;
+        let src_verts = &mesh.vertices;
         if src_verts.is_empty() || mesh.faces.is_empty() {
             continue;
         }
@@ -502,6 +512,12 @@ fn sanitize_id(input: &str) -> String {
     }
 }
 
+const S_MAT: [f32; 16] = [
+    1., 0., 0., 0., 0., 0., -1., 0., 0., 1., 0., 0., 0., 0., 0., 1.,
+];
+const S_INV: [f32; 16] = [
+    1., 0., 0., 0., 0., 0., 1., 0., 0., -1., 0., 0., 0., 0., 0., 1.,
+];
 const IDENTITY_F32: [f32; 16] = [
     1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
 ];
@@ -509,7 +525,65 @@ const IDENTITY_F64: [f64; 16] = [
     1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
 ];
 
+fn m4mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut r = [0f32; 16];
+    for i in 0..4 {
+        for j in 0..4 {
+            r[i * 4 + j] = (0..4).map(|k| a[i * 4 + k] * b[k * 4 + j]).sum();
+        }
+    }
+    r
+}
 
+fn as_mat4(m: &[f32]) -> [f32; 16] {
+    if m.len() >= 16 {
+        [
+            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13],
+            m[14], m[15],
+        ]
+    } else {
+        [
+            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+        ]
+    }
+}
+
+fn convert_coord_matrix(m: &[f32]) -> [f64; 16] {
+    let src = as_mat4(m);
+    let r = m4mul(&m4mul(&S_INV, &src), &S_MAT);
+    r.map(|v| v as f64)
+}
+
+fn invert_affine_row_major(m: &[f64; 16]) -> Option<[f64; 16]> {
+    let (a, b, c) = (m[0], m[1], m[2]);
+    let (d, e, f) = (m[4], m[5], m[6]);
+    let (g, h, i) = (m[8], m[9], m[10]);
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let r00 = (e * i - f * h) * inv_det;
+    let r01 = (c * h - b * i) * inv_det;
+    let r02 = (b * f - c * e) * inv_det;
+    let r10 = (f * g - d * i) * inv_det;
+    let r11 = (a * i - c * g) * inv_det;
+    let r12 = (c * d - a * f) * inv_det;
+    let r20 = (d * h - e * g) * inv_det;
+    let r21 = (b * g - a * h) * inv_det;
+    let r22 = (a * e - b * d) * inv_det;
+
+    let tx = m[12];
+    let ty = m[13];
+    let tz = m[14];
+    let itx = -(tx * r00 + ty * r10 + tz * r20);
+    let ity = -(tx * r01 + ty * r11 + tz * r21);
+    let itz = -(tx * r02 + ty * r12 + tz * r22);
+
+    Some([
+        r00, r01, r02, 0.0, r10, r11, r12, 0.0, r20, r21, r22, 0.0, itx, ity, itz, 1.0,
+    ])
+}
 
 fn joint_id(index: usize, name: &str) -> String {
     format!("joint_{}_{}", index, sanitize_id(name))
@@ -608,7 +682,7 @@ fn build_joint_node(
         id, sid, name
     )
     .ok()?;
-    let m: [f64; 16] = std::array::from_fn(|i| *sec.local_matrix.get(i).unwrap_or(&0.0) as f64);
+    let m = convert_coord_matrix(&sec.local_matrix);
     out.push_str("<matrix sid=\"transform\">");
     append_matrix_for_collada(&mut out, &m);
     out.push_str("</matrix>");
@@ -752,17 +826,21 @@ fn parse_dae_to_meta_text(xml: &str, model_name: &str) -> Result<Pmf2Meta> {
             .unwrap_or(IDENTITY_F32);
         let mut local_vertices = Vec::with_capacity(geom.vertices.len());
         for v in &geom.vertices {
-            let (wx, wy, wz) = if let Some(bind_matrix) = &binding.bind_shape_matrix {
+            let collada_position = if let Some(bind_matrix) = &binding.bind_shape_matrix {
                 transform_point_f32(bind_matrix, v[0], v[1], v[2])
             } else {
                 (v[0], v[1], v[2])
             };
+            let (wx, wy, wz) =
+                dae_to_game_position(collada_position.0, collada_position.1, collada_position.2);
             let (lx, ly, lz) = transform_point_f32(&inv_world, wx, wy, wz);
-            let (wnx, wny, wnz) = if let Some(bind_matrix) = &binding.bind_shape_matrix {
+            let collada_normal = if let Some(bind_matrix) = &binding.bind_shape_matrix {
                 normalize3(transform_direction_f32(bind_matrix, v[5], v[6], v[7]))
             } else {
                 (v[5], v[6], v[7])
             };
+            let (wnx, wny, wnz) =
+                dae_to_game_direction(collada_normal.0, collada_normal.1, collada_normal.2);
             let (lnx, lny, lnz) = normalize3(transform_direction_f32(&inv_world, wnx, wny, wnz));
             local_vertices.push([lx, ly, lz, v[3], collada_v_to_pmf2(v[4]), lnx, lny, lnz]);
         }
@@ -1213,7 +1291,7 @@ fn collect_joint_sections(
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("bone_{}", index));
         let collada_local = read_node_matrix(node).unwrap_or(IDENTITY_F32);
-        let local_matrix = collada_local.to_vec();
+        let local_matrix = restore_coord_matrix(&collada_local).to_vec();
         sections.push(BoneSection {
             index,
             name,
@@ -1586,6 +1664,9 @@ fn col_major_to_row_major_f32(values: &[f32]) -> [f32; 16] {
     row_major_to_col_major_f32(&m)
 }
 
+fn restore_coord_matrix(m: &[f32; 16]) -> [f32; 16] {
+    m4mul(&m4mul(&S_MAT, m), &S_INV)
+}
 
 fn vec_to_mat4(values: &[f32]) -> [f32; 16] {
     if values.len() >= 16 {
@@ -1655,6 +1736,13 @@ fn normalize3(v: (f32, f32, f32)) -> (f32, f32, f32) {
     }
 }
 
+fn dae_to_game_position(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+    (x, -z, y)
+}
+
+fn dae_to_game_direction(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+    (x, -z, y)
+}
 
 #[cfg(test)]
 mod tests {
@@ -2217,7 +2305,7 @@ mod tests {
 
         let meta = parse_dae_to_meta_text(xml, "bbox_margin").unwrap();
         assert!(meta.bbox[0] > 2.0);
-        assert!(meta.bbox[1] >= 1.0);
-        assert!(meta.bbox[2] > 3.0);
+        assert!(meta.bbox[1] > 3.0);
+        assert!(meta.bbox[2] >= 1.0);
     }
 }
