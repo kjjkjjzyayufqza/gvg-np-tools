@@ -1490,4 +1490,5 @@ mod tests {
         assert_eq!(third_image.metadata.height, 8);
         assert_eq!(third_image.metadata.format, PixelFormat::Rgba4444);
     }
+
 }
