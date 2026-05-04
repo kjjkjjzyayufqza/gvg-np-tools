@@ -1,6 +1,7 @@
 use crate::pmf2::{BoneMeshData, Pmf2Meta};
 use anyhow::{Result, bail};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PreviewVertex {
@@ -106,6 +107,12 @@ impl PreviewVisibility {
 
     pub fn is_bone_visible(&self, bone_index: usize) -> bool {
         !self.hidden_bones.contains(&bone_index)
+    }
+
+    pub fn mesh_visibility_key(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hidden_bones.hash(&mut hasher);
+        hasher.finish()
     }
 }
 

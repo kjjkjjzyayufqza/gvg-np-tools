@@ -61,6 +61,7 @@ pub struct GvgModdingApp {
     gpu_texture_bind_group: Option<wgpu::BindGroup>,
     gpu_mesh_stream_index: Option<usize>,
     gpu_mesh_pzz_revision: Option<u64>,
+    gpu_mesh_visibility_key: u64,
     last_preview_render_stats: Option<GpuRenderStats>,
     wgpu_state: Option<WgpuState>,
     recent_afs_paths: Vec<std::path::PathBuf>,
@@ -209,6 +210,7 @@ impl GvgModdingApp {
             gpu_texture_bind_group: None,
             gpu_mesh_stream_index: None,
             gpu_mesh_pzz_revision: None,
+            gpu_mesh_visibility_key: 0,
             last_preview_render_stats: None,
             wgpu_state,
             recent_afs_paths: persisted.recent_afs_paths.clone(),
@@ -288,6 +290,7 @@ impl eframe::App for GvgModdingApp {
                         self.tree_state.selected_stream,
                         &mut self.inspector_gim_cache,
                         &mut self.inspector_pmf2_cache,
+                        &mut self.preview_state.visibility,
                     );
                 });
         }
@@ -1484,11 +1487,14 @@ impl GvgModdingApp {
     fn update_gpu_mesh(&mut self) {
         let selected = self.tree_state.selected_stream;
         let current_pzz_revision = self.workspace.open_pzz().map(PzzWorkspace::revision);
+        let current_visibility_key = self.preview_state.visibility.mesh_visibility_key();
         if gpu_mesh_cache_is_current(
             self.gpu_mesh_stream_index,
             self.gpu_mesh_pzz_revision,
+            self.gpu_mesh_visibility_key,
             selected,
             current_pzz_revision,
+            current_visibility_key,
         ) {
             return;
         }
@@ -1498,6 +1504,7 @@ impl GvgModdingApp {
             self.gpu_texture_bind_group = None;
             self.gpu_mesh_stream_index = None;
             self.gpu_mesh_pzz_revision = None;
+            self.gpu_mesh_visibility_key = current_visibility_key;
             return;
         };
 
@@ -1508,6 +1515,7 @@ impl GvgModdingApp {
                 self.gpu_texture_bind_group = None;
                 self.gpu_mesh_stream_index = Some(stream_index);
                 self.gpu_mesh_pzz_revision = current_pzz_revision;
+                self.gpu_mesh_visibility_key = current_visibility_key;
                 return;
             }
         };
@@ -1519,12 +1527,15 @@ impl GvgModdingApp {
         let device = &rs.device;
         let queue = &rs.queue;
 
-        let (meshes, _, _, _) = pmf2::extract_per_bone_meshes(data, false);
-        self.gpu_mesh = renderer.upload_mesh(device, &meshes);
+        let (mut visible_meshes, _, _, _) = pmf2::extract_per_bone_meshes(data, false);
+        let total_mesh_count = visible_meshes.len();
+        visible_meshes.retain(|mesh| self.preview_state.visibility.is_bone_visible(mesh.bone_index));
+        self.gpu_mesh = renderer.upload_mesh(device, &visible_meshes);
         eprintln!(
-            "[gui] GPU mesh uploaded for stream {}: {} bone meshes, gpu_mesh={}",
+            "[gui] GPU mesh uploaded for stream {}: {} total bone meshes, {} visible, gpu_mesh={}",
             stream_index,
-            meshes.len(),
+            total_mesh_count,
+            visible_meshes.len(),
             self.gpu_mesh.is_some()
         );
 
@@ -1550,18 +1561,22 @@ impl GvgModdingApp {
 
         self.gpu_mesh_stream_index = Some(stream_index);
         self.gpu_mesh_pzz_revision = current_pzz_revision;
+        self.gpu_mesh_visibility_key = current_visibility_key;
     }
 }
 
 fn gpu_mesh_cache_is_current(
     cached_stream_index: Option<usize>,
     cached_pzz_revision: Option<u64>,
+    cached_visibility_key: u64,
     selected_stream: Option<usize>,
     current_pzz_revision: Option<u64>,
+    current_visibility_key: u64,
 ) -> bool {
     cached_stream_index == selected_stream
         && selected_stream.is_some()
         && cached_pzz_revision == current_pzz_revision
+        && cached_visibility_key == current_visibility_key
 }
 
 fn preview_fps(ctx: &egui::Context) -> f32 {
@@ -1698,8 +1713,10 @@ mod tests {
         assert!(!gpu_mesh_cache_is_current(
             Some(0),
             Some(1),
+            0x10,
             Some(0),
-            Some(2)
+            Some(2),
+            0x10,
         ));
     }
 

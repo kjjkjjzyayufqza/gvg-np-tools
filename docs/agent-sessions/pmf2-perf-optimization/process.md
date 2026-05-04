@@ -661,6 +661,245 @@ cargo check
   finished successfully
 ```
 
+## Unit Name -> plXX Table Extraction (2026-05-05)
+
+Goal: complete the remaining step for a human-readable mapping like
+`元祖高达 -> pl00` while keeping the previously recovered numeric formula:
+
+- `z_primary = 1649 + unit_id`
+- `z_alt = 1726 + unit_id`
+- `w_overlay_base = 6 * unit_id`
+
+### IDA MCP Investigation
+
+Used `ida-pro-mcp` `py_eval` with Shift-JIS scanning and verified that EBOOT has
+large inlined machine-name string pools (example region around `0x8A5AA80`).
+
+Key evidence:
+
+- Shift-JIS hit scan for `ガンダム` found 363 hits in EBOOT data section.
+- `xrefs_to(0x8A5B608)` shows menu/UI call sites including:
+  - `sub_8872A9C` (`0x8872A9C`)
+  - `sub_890D614` (`0x890D614`)
+- `sub_8872A9C` uses `*(&off_8A5B608 + v3)` as the machine name pointer.
+- `sub_8916E68` renders machine names from `*(&off_8A5B0C0 + v22)` (same ID-space family).
+- Special-case observed: `v3 == 76` can route to `off_8A1A390` (points to
+  `ガンダム試作３号機 ( デンドロビウム )`), so this slot has mode/context-specific naming.
+
+### Output
+
+Generated a full 77-row CSV:
+
+- `docs/agent-sessions/pmf2-perf-optimization/unit-name-plxx-table.csv`
+
+Columns:
+
+- `unit_id`
+- `pl_code`
+- `name_jp`
+- `z_data_primary`
+- `z_data_alt`
+- `w_data_overlay_base`
+
+Example rows:
+
+- `0, pl00, ガンダム, 1649, 1726, 0`
+- `10, pl0a, ニューガンダム, 1659, 1736, 60`
+- `65, pl41, ダブルオーライザー, 1714, 1791, 390`
+
+This provides the requested readable mapping foundation from machine name to
+`plXX` resource package IDs.
+
+## IDA Mapping Controller Deep Dive (2026-05-05)
+
+Follow-up on "which file actually controls character resource mapping".
+
+### Key Trace Path
+
+1. Battle flow calls `sub_890BD84`, then:
+   - `sub_8921F60(byte_8EA5786 & 0x7F, byte_8EA5787, v3[5])`
+2. `sub_8921F60` does:
+   - `sub_8920B5C(word_8A6B604[30*a1 + 10*a2 + a3], &unk_9B62000, &dword_8EA8BD0)`
+   - callback `sub_8920A98(13)`
+3. `sub_890C148` waits queue completion and then runs `sub_8922010` (relocates
+   pointers in `dword_8EA8BD0` block), then `sub_8910D94`.
+4. `sub_8910DE0` consumes `dword_8EA8BD0` and sets core per-side pointers
+   (`+28/+32/+36`) used by `sub_89116AC`.
+5. `sub_89116AC` / `sub_896AD80` populate `byte_8EA8A78`, `byte_8EA89F4`,
+   `byte_8EA89FC`, etc., which are directly consumed by `sub_8922D18`.
+
+### Why This Points To `Z_DATA.BIN`
+
+- In `sub_8883C40`, BIN bootstrap table (`off_8A1BD2C`) has:
+  - `Z_DATA.BIN` count `0xA5B`.
+- In `sub_8886FD8`, loader branch condition is:
+  - `resource_id != 0 && resource_id < 0xA5B`.
+- The resource ID tables used by mapping (`word_8A6B604`, `word_8A6BA6C`,
+  `word_8A6BC50`, `word_8A6BCF8`, `word_8A6C920`) are in this range
+  (examples: `1..42`, `1343..1911`), i.e. all under `0xA5B`.
+
+This is a strong code-level indicator that the mapping is controlled by
+`Z_DATA.BIN` indexed entries (numeric IDs), not by plain-text names.
+
+### Overlay Pointer Confirmation
+
+- `sub_8922D18` uses `off_8AFE520` slot pointers (`+1..+6`) to:
+  - `pl00ov0.bin`
+  - `pl00ov1.bin`
+  - `pl00ov2.bin`
+  - `pl00ov3.bin`
+  - `pl00ov4.bin`
+  - `pl00ov5.bin`
+- But which slot is selected is still driven by the runtime index arrays above
+  (`byte_8EA8A78` etc.), whose source chain goes back to `dword_8EA8BD0`.
+
+### Current Conclusion
+
+- The controlling source is:
+  - `Z_DATA.BIN` indexed records loaded through `word_8A6B604 -> dword_8EA8BD0`,
+  - then transformed into runtime mapping arrays used by overlay loaders.
+- No direct plain-text `rx-78-2` or `pl00l` mapping string was found in this IDB.
+
+### Remaining Gap
+
+- Need one more pass to bind a concrete unit ID (e.g. RX-78-2 internal numeric
+  ID) to a specific `word_8A6B604[...]` and final `pl00ov*` slot at runtime.
+
+## Unit -> plXX Table Recovery (2026-05-05)
+
+User goal clarified: recover the practical mapping table such as
+`RX-78-2 -> pl00`, and corresponding entries for other units.
+
+### Static Table Results
+
+Using IDA `py_eval` on `word_8A6BA6C`, the first 77 unit rows were decoded as:
+
+- `unit_id = 0..76`
+- `z_entry_primary = 1649 + unit_id`
+- `z_entry_alt = 1726 + unit_id`
+
+This exactly matches known checkpoints:
+
+- `unit_id=0 -> 1649/1726 -> pl00.pzz / pl00l.pzz`
+- `unit_id=10 -> 1659 -> pl0a.pzz` (already verified in prior docs/tests)
+
+So the recovered table is:
+
+- `unit_id n` -> primary `pl{n:02x}.pzz` at `Z_DATA` entry `1649+n`
+- `unit_id n` -> alt `pl{n:02x}l.pzz` at `Z_DATA` entry `1726+n`
+
+for `n in [0, 76]` (77 units total in this table).
+
+### Related Overlay Table
+
+For `W_DATA` overlays, `word_8A6B8D4[unit_id]` was decoded for all 77 units and
+is exactly `6 * unit_id`.
+
+Therefore:
+
+- overlay base entry = `6 * unit_id`
+- slots = `base + 0..5`
+
+`unit_id=0` resolves to `0..5` (`pl00ov0..5.bin`) as expected.
+
+## IDA MCP Resource List Investigation (2026-05-05)
+
+User requested checking whether the game has a resource mapping list like:
+`rx-78-2 -> pl00/pl00l`.
+
+### Commands / MCP Calls
+
+- `survey_binary`
+- `find(type=string, targets=[pl00, pl00l, rx-78-2, ...])`
+- `get_string` on all `pl00` hits
+- `xrefs_to` and `xref_query` on discovered addresses
+- `get_bytes` around `0x8A1BD14`, `0x9BCF820`, and table regions
+- `decompile(0x8883C40)` and `decompile(0x8922D18)`
+- `py_eval` scripts to decode table entries and string probes
+
+### Findings
+
+1. Found a definite BIN initialization list at `off_8A1BD2C`, used by
+   `sub_8883C40`:
+   - entry0: `X_DATA.BIN` -> `0x8B829C0`, `0x391F`
+   - entry1: `Y_DATA.BIN` -> `0x8B82840`, `0x16`
+   - entry2: `Z_DATA.BIN` -> `0x8B81240`, `0xA5B`
+   - entry3: `W_DATA.BIN` -> `0x8B80D40`, `0x1E0`
+
+2. Found another resource pointer table at `off_8AFE520`, used inside
+   `sub_8922D18`. Slots `+1..+6` map to six overlay blobs whose internal names
+   are:
+   - `pl00ov0.bin`
+   - `pl00ov1.bin`
+   - `pl00ov2.bin`
+   - `pl00ov3.bin`
+   - `pl00ov4.bin`
+   - `pl00ov5.bin`
+
+3. No plain-text hit for:
+   - `pl00l`
+   - `rx-78-2` / `RX-78-2`
+   in the loaded IDB image.
+
+### Interpretation
+
+- The binary clearly has resource list structures, but the specific
+  `rx-78-2 -> pl00/pl00l` mapping was not found as plain strings in this IDB.
+- Most likely that mapping is encoded/indexed (numeric IDs) in loaded data
+  blocks (especially `Z_DATA.BIN`) rather than direct text labels.
+
+### Suggested Next Step
+
+- Continue tracing `Z_DATA.BIN` consumers from the `sub_8883C40` load path and
+  identify the parser that converts table rows into per-unit resource handles.
+
+## Inspector Runtime Policy Fold + Mesh Visibility List (2026-05-05)
+
+User requested two inspector UX changes:
+
+1. `Runtime Render Policy` should be collapsible and default to collapsed.
+2. Add a `mesh list` with per-mesh visibility checkboxes (checked = visible,
+   default all checked/visible).
+
+### Changes Made
+
+#### `src/gui/inspector.rs`
+
+- `show_inspector(...)` now accepts `&mut PreviewVisibility` so inspector toggles
+  can directly modify preview visibility state.
+- `Runtime Render Policy` moved into:
+  - `egui::CollapsingHeader::new("Runtime Render Policy").default_open(false)`
+- Added `Mesh Visibility` section:
+  - one checkbox per PMF2 section with `has_mesh == true`
+  - checked state is driven by `PreviewVisibility::is_bone_visible(...)`
+  - changes call `PreviewVisibility::set_bone_visible(...)`
+  - convenience `All` / `None` buttons included.
+
+#### `src/render.rs`
+
+- Added `PreviewVisibility::mesh_visibility_key()` to generate a stable key from
+  hidden-bone set, used for GPU mesh cache invalidation.
+
+#### `src/gui.rs`
+
+- Added `gpu_mesh_visibility_key` cache field.
+- Passed `&mut self.preview_state.visibility` into inspector.
+- Extended `gpu_mesh_cache_is_current(...)` to include visibility key.
+- `update_gpu_mesh()` now:
+  - computes current visibility key,
+  - filters extracted PMF2 bone meshes by visibility before GPU upload,
+  - triggers reupload when visibility selection changes.
+
+### Verification
+
+```text
+cargo test --lib gui::tests::gpu_mesh_cache_invalidates_when_selected_stream_revision_changes
+  1 passed
+
+cargo check
+  finished successfully
+```
+
 ## Remove Preview Frame Spam Logs (2026-05-04)
 
 User requested deleting repeated terminal lines like:

@@ -1,6 +1,7 @@
 use super::gim_preview_cache::{GimPreviewCache, GimPreviewCacheKey, gim_data_identity};
 use crate::{
     pmf2, pzz,
+    render::PreviewVisibility,
     workspace::{AssetKind, EntryValidation, ModWorkspace},
 };
 use eframe::egui;
@@ -96,6 +97,7 @@ pub fn show_inspector(
     selected_stream: Option<usize>,
     gim_cache: &mut GimPreviewCache,
     pmf2_cache: &mut Pmf2SummaryCache,
+    preview_visibility: &mut PreviewVisibility,
 ) {
     ui.heading("Inspector");
     ui.separator();
@@ -110,6 +112,7 @@ pub fn show_inspector(
                     pzz.revision(),
                     gim_cache,
                     pmf2_cache,
+                    preview_visibility,
                 );
                 return;
             }
@@ -153,6 +156,7 @@ fn show_stream_inspector(
     pzz_revision: u64,
     gim_cache: &mut GimPreviewCache,
     pmf2_cache: &mut Pmf2SummaryCache,
+    preview_visibility: &mut PreviewVisibility,
 ) {
     ui.strong(&stream.name);
     ui.separator();
@@ -166,7 +170,14 @@ fn show_stream_inspector(
     ui.separator();
 
     match stream.kind {
-        AssetKind::Pmf2 => show_pmf2_summary(ui, stream.index, pzz_revision, data, pmf2_cache),
+        AssetKind::Pmf2 => show_pmf2_summary(
+            ui,
+            stream.index,
+            pzz_revision,
+            data,
+            pmf2_cache,
+            preview_visibility,
+        ),
         AssetKind::Gim => show_gim_summary(ui, stream.index, pzz_revision, data, gim_cache),
         _ => show_raw_summary(ui, data),
     }
@@ -178,6 +189,7 @@ fn show_pmf2_summary(
     pzz_revision: u64,
     data: &[u8],
     cache: &mut Pmf2SummaryCache,
+    preview_visibility: &mut PreviewVisibility,
 ) {
     ui.strong("PMF2 Summary");
     let key = Pmf2SummaryCacheKey {
@@ -214,60 +226,92 @@ fn show_pmf2_summary(
     labeled_row(ui, "Total faces", &format!("{}", summary.total_faces));
 
     ui.separator();
-    ui.strong("Runtime Render Policy");
-    ui.label("IDA-derived main render mask: draw bit means the game enqueues this section's display list. Preview can still show unsafe sections.");
-    egui::ScrollArea::vertical()
-        .max_height(360.0)
+    egui::CollapsingHeader::new("Mesh Visibility")
+        .default_open(true)
         .show(ui, |ui| {
-            egui::Grid::new("pmf2_runtime_render_policy_grid")
-                .striped(true)
-                .num_columns(9)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.strong("#");
-                    ui.strong("Name");
-                    ui.strong("Kind");
-                    ui.strong("Parent");
-                    ui.strong("Mesh");
-                    ui.strong("Mask");
-                    ui.strong("Draw");
-                    ui.strong("Traverse");
-                    ui.strong("Import target");
-                    ui.end_row();
-
-                    for section in &summary.sections {
-                        let policy = pmf2::section_render_policy(section.index);
-                        ui.monospace(format!("{:02}", section.index));
-                        ui.monospace(&section.name);
-                        ui.monospace(if section.category.is_empty() {
-                            "-"
-                        } else {
-                            &section.category
-                        });
-                        ui.monospace(format!("{}", section.parent));
-                        ui.monospace(if section.has_mesh { "yes" } else { "no" });
-                        ui.monospace(
-                            policy
-                                .flags
-                                .map(|flags| format!("0x{flags:04X}"))
-                                .unwrap_or_else(|| "unknown".to_string()),
-                        );
-                        ui.monospace(if policy.draws { "yes" } else { "no" });
-                        ui.monospace(if policy.traverses { "yes" } else { "no" });
-                        let target_text = if policy.safe_mesh_target {
-                            "safe"
-                        } else if policy.flags.is_none() {
-                            "unknown"
-                        } else {
-                            "unsafe"
-                        };
-                        if policy.safe_mesh_target {
-                            ui.monospace(target_text);
-                        } else {
-                            ui.colored_label(egui::Color32::YELLOW, target_text);
-                        }
-                        ui.end_row();
+            ui.horizontal(|ui| {
+                if ui.button("All").clicked() {
+                    for section in summary.sections.iter().filter(|s| s.has_mesh) {
+                        preview_visibility.set_bone_visible(section.index, true);
                     }
+                }
+                if ui.button("None").clicked() {
+                    for section in summary.sections.iter().filter(|s| s.has_mesh) {
+                        preview_visibility.set_bone_visible(section.index, false);
+                    }
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    for section in summary.sections.iter().filter(|s| s.has_mesh) {
+                        let mut visible = preview_visibility.is_bone_visible(section.index);
+                        let label = format!("#{:02} {}", section.index, section.name);
+                        if ui.checkbox(&mut visible, label).changed() {
+                            preview_visibility.set_bone_visible(section.index, visible);
+                        }
+                    }
+                });
+        });
+
+    egui::CollapsingHeader::new("Runtime Render Policy")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label("IDA-derived main render mask: draw bit means the game enqueues this section's display list. Preview can still show unsafe sections.");
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("pmf2_runtime_render_policy_grid")
+                        .striped(true)
+                        .num_columns(9)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("#");
+                            ui.strong("Name");
+                            ui.strong("Kind");
+                            ui.strong("Parent");
+                            ui.strong("Mesh");
+                            ui.strong("Mask");
+                            ui.strong("Draw");
+                            ui.strong("Traverse");
+                            ui.strong("Import target");
+                            ui.end_row();
+
+                            for section in &summary.sections {
+                                let policy = pmf2::section_render_policy(section.index);
+                                ui.monospace(format!("{:02}", section.index));
+                                ui.monospace(&section.name);
+                                ui.monospace(if section.category.is_empty() {
+                                    "-"
+                                } else {
+                                    &section.category
+                                });
+                                ui.monospace(format!("{}", section.parent));
+                                ui.monospace(if section.has_mesh { "yes" } else { "no" });
+                                ui.monospace(
+                                    policy
+                                        .flags
+                                        .map(|flags| format!("0x{flags:04X}"))
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                );
+                                ui.monospace(if policy.draws { "yes" } else { "no" });
+                                ui.monospace(if policy.traverses { "yes" } else { "no" });
+                                let target_text = if policy.safe_mesh_target {
+                                    "safe"
+                                } else if policy.flags.is_none() {
+                                    "unknown"
+                                } else {
+                                    "unsafe"
+                                };
+                                if policy.safe_mesh_target {
+                                    ui.monospace(target_text);
+                                } else {
+                                    ui.colored_label(egui::Color32::YELLOW, target_text);
+                                }
+                                ui.end_row();
+                            }
+                        });
                 });
         });
 }

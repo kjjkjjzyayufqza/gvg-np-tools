@@ -93,4 +93,18 @@ performance for high-face-count PMF2 models, using `ssbh_editor` /
 - [x] Fix camera focus offset by targeting mesh centroid instead of AABB center.
 - [x] Make inspector GIM preview fill the remaining inspector area.
 - [x] Remove throttled `[gpu] preview frame ...` runtime spam logs.
+- [x] Make `Runtime Render Policy` collapsible and default collapsed.
+- [x] Add inspector mesh visibility list with checkbox-per-mesh (default all visible).
+- [x] Rebuild GPU mesh when mesh visibility checkboxes change.
 - [ ] Manual GUI verification in app: DAE dialog and GIM preview dialog layout/UX.
+
+## IDA Resource Mapping Investigation (2026-05-05)
+
+- [x] Use `ida-pro-mcp` to search `rx-78-2`, `pl00`, `pl00l` in current IDB.
+- [x] Confirm BIN init table referenced by code (`off_8A1BD2C` in `sub_8883C40`).
+- [x] Confirm `pl00ov0..5.bin` pointer table (`off_8AFE520`) and callsite (`sub_8922D18`).
+- [x] Trace where `Z_DATA.BIN` payload is parsed into per-unit resource mapping.
+- [x] Bind a concrete unit numeric ID (RX-78-2 candidate) to final `pl00ov*` slot selection path.
+- [x] Recover full static `unit_id -> Z_DATA entry` formula (`1649+n`, `1726+n`) for 77 units.
+- [x] Build a human-readable `unit name -> plXX` table by resolving in-game unit names to `unit_id`.
+      - Output: `docs/agent-sessions/pmf2-perf-optimization/unit-name-plxx-table.csv` (77 rows).
