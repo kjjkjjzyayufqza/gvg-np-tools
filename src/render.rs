@@ -126,6 +126,10 @@ impl PreviewCamera {
             (bounds.min[1] + bounds.max[1]) * 0.5,
             (bounds.min[2] + bounds.max[2]) * 0.5,
         ];
+        Self::frame_bounds_with_target(bounds, center)
+    }
+
+    pub fn frame_bounds_with_target(bounds: PreviewBounds, target: [f32; 3]) -> Self {
         let extent = [
             (bounds.max[0] - bounds.min[0]).abs(),
             (bounds.max[1] - bounds.min[1]).abs(),
@@ -134,9 +138,10 @@ impl PreviewCamera {
         let radius = length(extent).max(1.0) * 0.5;
         let fov_y_radians = 45.0_f32.to_radians();
         Self {
-            target: center,
-            yaw: 0.35,
-            pitch: 0.35,
+            target,
+            // Default to a front-facing, slightly top-down view.
+            yaw: std::f32::consts::PI + 0.35,
+            pitch: -0.28,
             distance: (radius / (fov_y_radians * 0.5).tan()).max(2.0),
             fov_y_radians,
             near: 0.01,

@@ -13,7 +13,7 @@ use crate::{
     pmf2, pzz,
     render::PreviewState,
     save::rebuild_pzz_payload_cached,
-    texture::GimReplaceFormat,
+    texture::{GimImage, GimReplaceFormat},
     workspace::{ModWorkspace, PzzWorkspace},
 };
 use anyhow::Result;
@@ -62,7 +62,6 @@ pub struct GvgModdingApp {
     gpu_mesh_stream_index: Option<usize>,
     gpu_mesh_pzz_revision: Option<u64>,
     last_preview_render_stats: Option<GpuRenderStats>,
-    preview_debug_last_log: Option<Instant>,
     wgpu_state: Option<WgpuState>,
     recent_afs_paths: Vec<std::path::PathBuf>,
     last_dir_open_afs: Option<std::path::PathBuf>,
@@ -79,6 +78,8 @@ pub struct GvgModdingApp {
     last_dir_export_stream_png: Option<std::path::PathBuf>,
     last_dir_replace_stream_png: Option<std::path::PathBuf>,
     gim_replace_format: GimReplaceFormat,
+    pending_dae_replace_config: Option<PendingDaeReplaceConfig>,
+    pending_gim_replace_config: Option<PendingGimReplaceConfig>,
     /// Persisted CW cheat INI path; also drives the CWCheat Editor buffer reload.
     cwcheat_file_path: Option<std::path::PathBuf>,
     auto_update_cwcheat_on_save_afs: bool,
@@ -98,6 +99,23 @@ struct SaveAfsJob {
     receiver: Receiver<Result<usize, String>>,
     output_path: std::path::PathBuf,
     dirty_count: usize,
+}
+
+struct PendingDaeReplaceConfig {
+    stream_index: usize,
+    template_data: Vec<u8>,
+    dae_path: std::path::PathBuf,
+    flip_uv_v: bool,
+}
+
+struct PendingGimReplaceConfig {
+    stream_index: usize,
+    source_image: GimImage,
+    png_path: std::path::PathBuf,
+    png_data: Vec<u8>,
+    preview_image: egui::ColorImage,
+    preview_texture: Option<egui::TextureHandle>,
+    selected_format: GimReplaceFormat,
 }
 
 /// Default logical inner size (**1920×1080**, Full HD).
@@ -192,7 +210,6 @@ impl GvgModdingApp {
             gpu_mesh_stream_index: None,
             gpu_mesh_pzz_revision: None,
             last_preview_render_stats: None,
-            preview_debug_last_log: None,
             wgpu_state,
             recent_afs_paths: persisted.recent_afs_paths.clone(),
             last_dir_open_afs: persisted.last_dir_open_afs,
@@ -213,6 +230,8 @@ impl GvgModdingApp {
                 .as_deref()
                 .and_then(GimReplaceFormat::from_key)
                 .unwrap_or(GimReplaceFormat::Auto),
+            pending_dae_replace_config: None,
+            pending_gim_replace_config: None,
             cwcheat_file_path: persisted.cwcheat_file_path.clone(),
             auto_update_cwcheat_on_save_afs: persisted.auto_update_cwcheat_on_save_afs,
             cwcheat_settings_modal_open: false,
@@ -305,6 +324,8 @@ impl eframe::App for GvgModdingApp {
             }
         }
 
+        self.show_dae_replace_config_modal(ctx);
+        self.show_gim_replace_config_modal(ctx);
         Self::show_error_modal(ctx, &mut self.pending_alert);
         self.show_cwcheat_settings_modal(ctx);
 
@@ -632,25 +653,6 @@ impl GvgModdingApp {
                     ui.close();
                 }
             });
-
-            ui.add_space(6.0);
-            ui.separator();
-            ui.label("GIM Replace:");
-            let old_format = self.gim_replace_format;
-            egui::ComboBox::from_id_salt("gim_replace_format")
-                .selected_text(self.gim_replace_format.label())
-                .show_ui(ui, |ui| {
-                    for format in GimReplaceFormat::all() {
-                        ui.selectable_value(&mut self.gim_replace_format, *format, format.label());
-                    }
-                });
-            if self.gim_replace_format != old_format {
-                self.mark_gui_state_dirty();
-                self.status = format!(
-                    "GIM PNG replace format: {}",
-                    self.gim_replace_format.label()
-                );
-            }
 
             ui.add_space(6.0);
             if ui
@@ -1021,28 +1023,13 @@ impl GvgModdingApp {
             &path,
             &mut self.gui_state_dirty,
         );
-        let meta = match dae::read_dae_to_meta(&path, None) {
-            Ok(m) => m,
-            Err(e) => {
-                self.notify_error(format!("DAE import failed: {e}"));
-                return;
-            }
-        };
-        let new_pmf2 = match pmf2::patch_pmf2_with_mesh_updates(&template_data, &meta, 0.0) {
-            Some(d) => d,
-            None => {
-                self.notify_error("Failed to patch PMF2 from DAE.".to_owned());
-                return;
-            }
-        };
-        match self.workspace.replace_stream(stream_index, new_pmf2) {
-            Ok(()) => {
-                self.gpu_mesh_stream_index = None;
-                self.gpu_mesh_pzz_revision = None;
-                self.status = "Replaced PMF2 stream from DAE".to_string();
-            }
-            Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
-        }
+        self.pending_dae_replace_config = Some(PendingDaeReplaceConfig {
+            stream_index,
+            template_data,
+            dae_path: path.clone(),
+            flip_uv_v: false,
+        });
+        self.status = format!("Selected DAE: {} (configure UV flip in dialog)", path.display());
     }
 
     fn replace_stream_pmf2(&mut self, stream_index: usize) {
@@ -1168,8 +1155,185 @@ impl GvgModdingApp {
             png_data.len(),
             png_read_started.elapsed()
         );
+        let preview_image = match decode_png_preview_color_image(&png_data) {
+            Ok(img) => img,
+            Err(e) => {
+                self.notify_error(format!("Failed to decode PNG preview: {e}"));
+                return;
+            }
+        };
+
+        self.pending_gim_replace_config = Some(PendingGimReplaceConfig {
+            stream_index,
+            source_image: image,
+            png_path: path.clone(),
+            png_data,
+            preview_image,
+            preview_texture: None,
+            selected_format: self.gim_replace_format,
+        });
+        self.status = format!("Selected PNG: {} (choose GIM format in dialog)", path.display());
+    }
+
+    fn show_dae_replace_config_modal(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_dae_replace_config.as_ref() else {
+            return;
+        };
+        let mut apply = false;
+        let mut cancel = false;
+        let mut open = true;
+        let dialog_path = pending.dae_path.clone();
+        egui::Window::new("Replace PMF2 from DAE")
+            .id(egui::Id::new("gvg_dae_replace_config_modal"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(560.0, 220.0))
+            .min_size(egui::vec2(460.0, 180.0))
+            .show(ctx, |ui| {
+                ui.label("Configure UV import behavior before patching PMF2:");
+                ui.label(egui::RichText::new(dialog_path.display().to_string()).weak().monospace());
+                ui.add_space(8.0);
+                if let Some(state) = self.pending_dae_replace_config.as_mut() {
+                    ui.checkbox(&mut state.flip_uv_v, "Flip UV V (v = 1 - v)");
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Apply Replace").clicked() {
+                        apply = true;
+                    }
+                });
+            });
+        if !open {
+            cancel = true;
+        }
+        if cancel {
+            self.pending_dae_replace_config = None;
+            return;
+        }
+        if !apply {
+            return;
+        }
+
+        let Some(state) = self.pending_dae_replace_config.take() else {
+            return;
+        };
+        let meta = match dae::read_dae_to_meta_with_uv_flip(&state.dae_path, None, state.flip_uv_v) {
+            Ok(m) => m,
+            Err(e) => {
+                self.notify_error(format!("DAE import failed: {e}"));
+                return;
+            }
+        };
+        let new_pmf2 = match pmf2::patch_pmf2_with_mesh_updates(&state.template_data, &meta, 0.0) {
+            Some(d) => d,
+            None => {
+                self.notify_error("Failed to patch PMF2 from DAE.".to_owned());
+                return;
+            }
+        };
+        match self.workspace.replace_stream(state.stream_index, new_pmf2) {
+            Ok(()) => {
+                self.gpu_mesh_stream_index = None;
+                self.gpu_mesh_pzz_revision = None;
+                self.status = if state.flip_uv_v {
+                    "Replaced PMF2 stream from DAE (UV V flipped)".to_string()
+                } else {
+                    "Replaced PMF2 stream from DAE (UV V unchanged)".to_string()
+                };
+            }
+            Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
+        }
+    }
+
+    fn show_gim_replace_config_modal(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_gim_replace_config.as_ref() else {
+            return;
+        };
+        let mut apply = false;
+        let mut cancel = false;
+        let mut open = true;
+        let dialog_path = pending.png_path.clone();
+        egui::Window::new("Replace GIM from PNG")
+            .id(egui::Id::new("gvg_gim_replace_config_modal"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(900.0, 680.0))
+            .min_size(egui::vec2(560.0, 420.0))
+            .show(ctx, |ui| {
+                if let Some(state) = self.pending_gim_replace_config.as_mut() {
+                    if state.preview_texture.is_none() {
+                        let texture_name =
+                            format!("gim_replace_preview_{}_{}", state.stream_index, state.png_path.display());
+                        state.preview_texture = Some(ctx.load_texture(
+                            texture_name,
+                            state.preview_image.clone(),
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+                ui.label(egui::RichText::new(dialog_path.display().to_string()).weak().monospace());
+                ui.horizontal(|ui| {
+                    ui.label("Format:");
+                    if let Some(state) = self.pending_gim_replace_config.as_mut() {
+                        egui::ComboBox::from_id_salt("gim_replace_modal_format")
+                            .selected_text(state.selected_format.label())
+                            .show_ui(ui, |ui| {
+                                for format in GimReplaceFormat::all() {
+                                    ui.selectable_value(
+                                        &mut state.selected_format,
+                                        *format,
+                                        format.label(),
+                                    );
+                                }
+                            });
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Apply Replace").clicked() {
+                        apply = true;
+                    }
+                });
+                ui.separator();
+                let preview_size = ui.available_size();
+                if let Some(state) = self.pending_gim_replace_config.as_mut() {
+                    if let Some(texture) = state.preview_texture.as_ref() {
+                        ui.add_sized(
+                            preview_size,
+                            egui::Image::new(texture).fit_to_exact_size(preview_size),
+                        );
+                    } else {
+                        ui.allocate_ui(preview_size, |ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.label("PNG preview unavailable.");
+                            });
+                        });
+                    }
+                }
+            });
+        if !open {
+            cancel = true;
+        }
+        if cancel {
+            self.pending_gim_replace_config = None;
+            return;
+        }
+        if !apply {
+            return;
+        }
+
+        let Some(state) = self.pending_gim_replace_config.take() else {
+            return;
+        };
         let replace_started = Instant::now();
-        let replaced = match image.replace_png_bytes_with_format(&png_data, self.gim_replace_format)
+        let replaced = match state
+            .source_image
+            .replace_png_bytes_with_format(&state.png_data, state.selected_format)
         {
             Ok(d) => d,
             Err(e) => {
@@ -1179,21 +1343,28 @@ impl GvgModdingApp {
         };
         eprintln!(
             "[gui] rebuilt replacement GIM stream {} in {:?}",
-            stream_index,
+            state.stream_index,
             replace_started.elapsed()
         );
         let workspace_replace_started = Instant::now();
-        match self.workspace.replace_stream(stream_index, replaced) {
+        match self.workspace.replace_stream(state.stream_index, replaced) {
             Ok(()) => {
                 eprintln!(
                     "[gui] replaced workspace stream {} in {:?}",
-                    stream_index,
+                    state.stream_index,
                     workspace_replace_started.elapsed()
                 );
+                if self.gim_replace_format != state.selected_format {
+                    self.gim_replace_format = state.selected_format;
+                    self.mark_gui_state_dirty();
+                }
                 self.gpu_mesh_stream_index = None;
                 self.gpu_mesh_pzz_revision = None;
                 self.gpu_texture_bind_group = None;
-                self.status = "Replaced GIM stream from PNG".to_string();
+                self.status = format!(
+                    "Replaced GIM stream from PNG ({})",
+                    state.selected_format.label()
+                );
             }
             Err(e) => self.notify_error(format!("Stream replace failed: {e}")),
         }
@@ -1240,7 +1411,12 @@ impl GvgModdingApp {
         let camera = *self
             .preview_state
             .camera
-            .get_or_insert_with(|| crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds));
+            .get_or_insert_with(|| {
+                crate::render::PreviewCamera::frame_bounds_with_target(
+                    gpu_mesh.bounds,
+                    gpu_mesh.focus_target,
+                )
+            });
 
         let (render_stats, texture_id) = {
             let renderer = match &mut self.gpu_renderer {
@@ -1281,7 +1457,12 @@ impl GvgModdingApp {
             let cam = self
                 .preview_state
                 .camera
-                .get_or_insert_with(|| crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds));
+                .get_or_insert_with(|| {
+                    crate::render::PreviewCamera::frame_bounds_with_target(
+                        gpu_mesh.bounds,
+                        gpu_mesh.focus_target,
+                    )
+                });
             cam.orbit(delta.x * 0.01, -delta.y * 0.01);
             ctx.request_repaint();
         }
@@ -1289,59 +1470,15 @@ impl GvgModdingApp {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
                 let cam = self.preview_state.camera.get_or_insert_with(|| {
-                    crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds)
+                    crate::render::PreviewCamera::frame_bounds_with_target(
+                        gpu_mesh.bounds,
+                        gpu_mesh.focus_target,
+                    )
                 });
                 cam.zoom((-scroll * 0.001).clamp(-0.5, 0.5));
                 ctx.request_repaint();
             }
         }
-        if let Some(stats) = render_stats {
-            let debug_counts = (
-                gpu_mesh.vertex_count(),
-                gpu_mesh.face_count(),
-                gpu_mesh.triangle_index_count(),
-                gpu_mesh.wireframe_index_count(),
-            );
-            self.log_preview_debug_if_due(
-                fps,
-                stats,
-                debug_counts.0,
-                debug_counts.1,
-                debug_counts.2,
-                debug_counts.3,
-            );
-        }
-    }
-
-    fn log_preview_debug_if_due(
-        &mut self,
-        fps: f32,
-        stats: GpuRenderStats,
-        vertex_count: u32,
-        face_count: u32,
-        triangle_index_count: u32,
-        wireframe_index_count: u32,
-    ) {
-        let now = Instant::now();
-        if self
-            .preview_debug_last_log
-            .is_some_and(|last| now.duration_since(last).as_millis() < 1000)
-        {
-            return;
-        }
-        self.preview_debug_last_log = Some(now);
-        eprintln!(
-            "[gpu] preview frame: fps={fps:.1}, viewport={}x{}, verts={}, faces={}, tri_indices={}, wire_indices={}, render_ms={:.2}, encode_ms={:.2}, submit_ms={:.2}",
-            stats.viewport_size[0],
-            stats.viewport_size[1],
-            vertex_count,
-            face_count,
-            triangle_index_count,
-            wireframe_index_count,
-            stats.total_ms,
-            stats.encode_ms,
-            stats.submit_ms
-        );
     }
 
     fn update_gpu_mesh(&mut self) {
@@ -1541,6 +1678,17 @@ fn copy_via_temp_rename(src: &Path, dst: &Path) -> std::io::Result<u64> {
     Ok(nbytes)
 }
 
+fn decode_png_preview_color_image(png_data: &[u8]) -> Result<egui::ColorImage> {
+    let png = image::load_from_memory(png_data)
+        .map_err(|e| anyhow::anyhow!("decode png failed: {e}"))?
+        .to_rgba8();
+    let size = [png.width() as usize, png.height() as usize];
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        png.as_raw(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1553,5 +1701,22 @@ mod tests {
             Some(0),
             Some(2)
         ));
+    }
+
+    #[test]
+    fn decode_png_preview_preserves_image_dimensions() {
+        let mut rgba = image::RgbaImage::new(2, 1);
+        rgba.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        rgba.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(rgba)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+
+        let color_image = decode_png_preview_color_image(&bytes).unwrap();
+        assert_eq!(color_image.size, [2, 1]);
     }
 }

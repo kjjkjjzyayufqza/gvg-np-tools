@@ -7,7 +7,10 @@ use eframe::egui;
 pub fn preview_controls(ui: &mut egui::Ui, mesh: &GpuMesh, state: &mut PreviewState) {
     ui.horizontal_wrapped(|ui| {
         if ui.button("Frame").clicked() {
-            state.camera = Some(PreviewCamera::frame_bounds(mesh.bounds));
+            state.camera = Some(PreviewCamera::frame_bounds_with_target(
+                mesh.bounds,
+                mesh.focus_target,
+            ));
         }
         ui.checkbox(&mut state.wireframe, "Wireframe");
         ui.checkbox(&mut state.visibility.show_grid, "Grid");

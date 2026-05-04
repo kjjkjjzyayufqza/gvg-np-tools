@@ -731,6 +731,14 @@ struct MeshBinding {
 }
 
 pub fn read_dae_to_meta(path: &Path, model_name: Option<&str>) -> Result<Pmf2Meta> {
+    read_dae_to_meta_with_uv_flip(path, model_name, true)
+}
+
+pub fn read_dae_to_meta_with_uv_flip(
+    path: &Path,
+    model_name: Option<&str>,
+    flip_uv_v: bool,
+) -> Result<Pmf2Meta> {
     let xml = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let name = model_name
@@ -741,10 +749,19 @@ pub fn read_dae_to_meta(path: &Path, model_name: Option<&str>) -> Result<Pmf2Met
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_else(|| "model".to_string());
-    parse_dae_to_meta_text(&xml, &name)
+    parse_dae_to_meta_text_with_uv_flip(&xml, &name, flip_uv_v)
 }
 
+#[cfg(test)]
 fn parse_dae_to_meta_text(xml: &str, model_name: &str) -> Result<Pmf2Meta> {
+    parse_dae_to_meta_text_with_uv_flip(xml, model_name, true)
+}
+
+fn parse_dae_to_meta_text_with_uv_flip(
+    xml: &str,
+    model_name: &str,
+    flip_uv_v: bool,
+) -> Result<Pmf2Meta> {
     let doc = Document::parse(xml).context("failed to parse dae xml")?;
     let visual_scene = doc
         .descendants()
@@ -842,7 +859,8 @@ fn parse_dae_to_meta_text(xml: &str, model_name: &str) -> Result<Pmf2Meta> {
             let (wnx, wny, wnz) =
                 dae_to_game_direction(collada_normal.0, collada_normal.1, collada_normal.2);
             let (lnx, lny, lnz) = normalize3(transform_direction_f32(&inv_world, wnx, wny, wnz));
-            local_vertices.push([lx, ly, lz, v[3], collada_v_to_pmf2(v[4]), lnx, lny, lnz]);
+            let imported_v = if flip_uv_v { collada_v_to_pmf2(v[4]) } else { v[4] };
+            local_vertices.push([lx, ly, lz, v[3], imported_v, lnx, lny, lnz]);
         }
 
         let entry = mesh_by_bone
@@ -1948,6 +1966,49 @@ mod tests {
         assert!((verts[0][4] - 0.75).abs() < 1e-6);
         assert!((verts[1][4] - 0.5).abs() < 1e-6);
         assert!((verts[2][4] - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dae_import_can_keep_collada_v_when_uv_flip_disabled() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <library_geometries>
+    <geometry id="geom0" name="root">
+      <mesh>
+        <source id="geom0-positions">
+          <float_array id="geom0-positions-array" count="9">0 0 0 1 0 0 0 1 0</float_array>
+          <technique_common><accessor source="#geom0-positions-array" count="3" stride="3"/></technique_common>
+        </source>
+        <source id="geom0-map-0">
+          <float_array id="geom0-map-0-array" count="6">0.25 0.25 0.5 0.5 0.75 0.75</float_array>
+          <technique_common><accessor source="#geom0-map-0-array" count="3" stride="2"/></technique_common>
+        </source>
+        <vertices id="geom0-vertices">
+          <input semantic="POSITION" source="#geom0-positions"/>
+        </vertices>
+        <triangles count="1">
+          <input semantic="VERTEX" source="#geom0-vertices" offset="0"/>
+          <input semantic="TEXCOORD" source="#geom0-map-0" offset="1"/>
+          <p>0 0 1 1 2 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="root" name="root">
+        <instance_geometry url="#geom0"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>"##;
+
+        let meta = parse_dae_to_meta_text_with_uv_flip(xml, "uv_import", false).unwrap();
+        let verts = &meta.bone_meshes[0].local_vertices;
+        assert!((verts[0][4] - 0.25).abs() < 1e-6);
+        assert!((verts[1][4] - 0.5).abs() < 1e-6);
+        assert!((verts[2][4] - 0.75).abs() < 1e-6);
     }
 
     #[test]

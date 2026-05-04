@@ -515,3 +515,232 @@ cargo test --lib
   66 passed
   0 failed
 ```
+
+## DAE UV Flip Option + GIM Replace Config Dialog (2026-05-04)
+
+User requested two UX/behavior changes:
+
+1. When running "Replace from DAE" for PMF2, prompt whether UV V should be
+   flipped.
+2. Remove the top-left global GIM PNG format selector and instead show a config
+   dialog after right-click "Replace from PNG", with format selection and a
+   PNG preview that fills the dialog area.
+
+### TDD (RED -> GREEN)
+
+Added a new DAE importer test first:
+
+```text
+dae::tests::dae_import_can_keep_collada_v_when_uv_flip_disabled
+```
+
+Initial RED run:
+
+```text
+cargo test --lib dae_import_can_keep_collada_v_when_uv_flip_disabled
+  failed (E0425): parse_dae_to_meta_text_with_uv_flip not found
+```
+
+### Implementation Summary
+
+#### `src/dae.rs`
+
+- Added `read_dae_to_meta_with_uv_flip(path, model_name, flip_uv_v)`.
+- Kept `read_dae_to_meta(...)` as the default behavior wrapper (`flip_uv_v = true`)
+  to avoid breaking existing CLI flow.
+- Added internal parser path with UV policy:
+  `parse_dae_to_meta_text_with_uv_flip(xml, model_name, flip_uv_v)`.
+- During import, UV V now resolves as:
+  - `1.0 - v` when `flip_uv_v = true` (previous behavior)
+  - `v` when `flip_uv_v = false`.
+
+#### `src/gui.rs`
+
+- Removed the top menu `GIM Replace` format combo box.
+- Added pending dialog state for DAE replace and GIM replace flows.
+- `Replace from DAE` now:
+  1) picks DAE file,
+  2) opens a config modal with `Flip UV V (v = 1 - v)` checkbox,
+  3) applies replacement only after confirmation.
+- `Replace from PNG` (right-click stream action) now:
+  1) picks PNG file,
+  2) opens a config modal with format `ComboBox`,
+  3) shows PNG preview using remaining modal area (`fit_to_exact_size`) to fill
+     the dialog visually,
+  4) applies replacement only after confirmation.
+- Added helper `decode_png_preview_color_image(...)` to convert selected PNG into
+  egui `ColorImage` for modal preview.
+
+### Added/Updated Tests
+
+- `dae::tests::dae_import_can_keep_collada_v_when_uv_flip_disabled`
+- `gui::tests::decode_png_preview_preserves_image_dimensions`
+
+### Verification
+
+```text
+cargo test --lib dae_import_can_keep_collada_v_when_uv_flip_disabled
+  1 passed
+
+cargo test --lib decode_png_preview_preserves_image_dimensions
+  1 passed
+
+cargo test --lib
+  68 passed
+  0 failed
+
+cargo check
+  finished successfully
+```
+
+### Remaining Manual Check
+
+- Launch GUI and verify the two new config modals:
+  - DAE replace UV flip choice behaves as expected on real model.
+  - GIM replace PNG preview layout and format selection UX are acceptable.
+
+## Dialog UX Follow-up Fixes (2026-05-04)
+
+User follow-up requested:
+
+1. DAE UV flip option should be **unchecked by default**.
+2. `Replace GIM from PNG` config dialog should not keep growing in height.
+3. Config dialogs should be draggable windows, not confirm-style dialogs.
+
+### Changes Made
+
+#### `src/gui.rs`
+
+- Changed DAE pending config default:
+  - `flip_uv_v: true` -> `flip_uv_v: false`.
+- Replaced both config UIs from `egui::Modal` to draggable `egui::Window`:
+  - `show_dae_replace_config_modal`
+  - `show_gim_replace_config_modal`
+- Updated dialog window behavior:
+  - `collapsible(false)`, `resizable(true)`, `default_size(...)`, `min_size(...)`.
+  - Supports drag/move out of the box.
+- Fixed GIM dialog runaway growth by removing `bottom_up + available_size` pattern
+  and rendering preview with a stable remaining-area layout:
+  - controls in top row
+  - separator
+  - preview fills current `ui.available_size()` via `ui.add_sized(...)`.
+
+### Verification
+
+```text
+cargo test --lib gui::tests::decode_png_preview_preserves_image_dimensions
+  1 passed
+
+cargo test --lib dae_import_can_keep_collada_v_when_uv_flip_disabled
+  1 passed
+
+cargo check
+  finished successfully
+```
+
+## Default Camera Angle Tweak (2026-05-04)
+
+User requested changing the preview camera from "behind the character" to a
+"front-facing, slightly elevated, looking downward" initial view.
+
+### Change
+
+Updated `src/render.rs` `PreviewCamera::frame_bounds()` defaults:
+
+- `yaw: 0.35` -> `yaw: PI + 0.35` (rotate to front side)
+- `pitch: 0.35` -> `pitch: -0.28` (move camera above and look downward)
+
+This only affects newly framed camera states (`camera: None` -> `frame_bounds`).
+If a camera is already active for the current preview, reselect stream or reset
+preview state to apply.
+
+### Verification
+
+```text
+cargo check
+  finished successfully
+```
+
+## Remove Preview Frame Spam Logs (2026-05-04)
+
+User requested deleting repeated terminal lines like:
+
+```text
+[gpu] preview frame: fps=..., viewport=..., verts=..., ...
+```
+
+### Change
+
+Updated `src/gui.rs` to remove the periodic preview debug logger path:
+
+- Removed `preview_debug_last_log` field from `GvgModdingApp`.
+- Removed call site in `show_3d_preview(...)` that emitted per-second frame logs.
+- Removed helper `log_preview_debug_if_due(...)` and its `eprintln!`.
+
+This keeps preview rendering behavior unchanged while stopping terminal spam.
+
+### Verification
+
+```text
+cargo check
+  finished successfully
+```
+
+## Inspector GIM Full-Area Preview (2026-05-04)
+
+User requested that when left-click selecting any GIM stream, the Inspector view
+should use the whole remaining area to display the texture, instead of a small thumbnail.
+
+### Change
+
+Updated `src/gui/inspector.rs` `show_gim_summary(...)`:
+
+- Kept compact metadata line (`dimensions | format | swizzled`) at top.
+- Replaced fixed thumbnail logic (`max_side = 200`) with full-area rendering.
+- Uses current remaining inspector size:
+  - `let available = ui.available_size();`
+  - `ui.add_sized(available, Image::...fit_to_exact_size(available))`
+- Added small fallback message when inspector area is too small.
+
+This makes selected GIM preview fill the inspector content region.
+
+### Verification
+
+```text
+cargo check
+  finished successfully
+```
+
+## Camera Focus Offset Fix (2026-05-04)
+
+User observed default camera framing looked slightly off-center.
+
+### Root Cause
+
+Default framing targeted the AABB center (`(min + max) / 2`). For asymmetric
+meshes (weapons/wings/offset geometry), AABB center can drift away from the
+visual character center.
+
+### Change
+
+- Added centroid-based focus target on GPU mesh build:
+  - `GpuMesh.focus_target: [f32; 3]`
+  - computed as average of all uploaded vertex positions.
+- Added `PreviewCamera::frame_bounds_with_target(bounds, target)`.
+- Switched initial camera framing and `Frame` button to use:
+  - bounds for distance/frustum
+  - centroid for target.
+
+Updated files:
+
+- `src/gpu_renderer.rs`
+- `src/render.rs`
+- `src/gui.rs`
+- `src/gui/preview.rs`
+
+### Verification
+
+```text
+cargo check
+  finished successfully
+```

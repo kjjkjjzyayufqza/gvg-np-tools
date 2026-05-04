@@ -77,3 +77,20 @@ performance for high-face-count PMF2 models, using `ssbh_editor` /
 - [x] Add FPS display and throttled render-frame debug logs.
 - [x] Cache PMF2 inspector summary to avoid re-extracting 231k vertices every frame.
 - [ ] Re-test with the user high-poly PMF2/DAE case in release mode.
+
+## Replace Workflow Follow-up (2026-05-04)
+
+- [x] Add DAE -> PMF2 replace config dialog to choose whether UV V should be flipped.
+- [x] Add parser option so DAE import can keep Collada V when UV flip is disabled.
+- [x] Remove top menu GIM replace format selector.
+- [x] Change right-click GIM "Replace from PNG" flow to open a config dialog after PNG selection.
+- [x] Add GIM replace config dialog format picker with full-window PNG preview.
+- [x] Add regressions for optional DAE UV flip and PNG preview decode helper.
+- [x] Default DAE UV flip checkbox to unchecked.
+- [x] Switch DAE/GIM config dialogs from confirm-style modal to draggable windows.
+- [x] Fix GIM replace dialog height runaway by replacing bottom-up auto-grow layout.
+- [x] Adjust default 3D preview camera to front-facing with slight top-down angle.
+- [x] Fix camera focus offset by targeting mesh centroid instead of AABB center.
+- [x] Make inspector GIM preview fill the remaining inspector area.
+- [x] Remove throttled `[gpu] preview frame ...` runtime spam logs.
+- [ ] Manual GUI verification in app: DAE dialog and GIM preview dialog layout/UX.

@@ -291,31 +291,29 @@ fn show_gim_summary(
                 ui.label("GIM decode error: preview cache is empty.");
                 return;
             };
-            labeled_row(
-                ui,
-                "Dimensions",
-                &format!("{}x{}", image.metadata.width, image.metadata.height),
-            );
-            labeled_row(ui, "Format", &format!("{:?}", image.metadata.format));
-            labeled_row(
-                ui,
-                "Swizzled",
-                if image.metadata.swizzled { "Yes" } else { "No" },
-            );
-            let metadata = image.metadata.clone();
+            let dims = format!("{}x{}", image.metadata.width, image.metadata.height);
+            let format_text = format!("{:?}", image.metadata.format);
+            let swizzled = if image.metadata.swizzled { "swizzled" } else { "linear" };
             ui.separator();
+
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(format!("{dims} | {format_text} | {swizzled}"));
+            });
+            ui.separator();
+
+            let available = ui.available_size();
+            if available.x <= 1.0 || available.y <= 1.0 {
+                ui.label("Inspector area too small for GIM preview.");
+                return;
+            }
+
             if let Some(texture) =
-                cache.texture_handle(ui.ctx(), format!("inspector_gim_thumb_{}", stream_index))
+                cache.texture_handle(ui.ctx(), format!("inspector_gim_full_{}", stream_index))
             {
-                let max_side = 200.0;
-                let scale = (max_side / metadata.width as f32)
-                    .min(max_side / metadata.height as f32)
-                    .min(1.0);
-                let display_size = egui::vec2(
-                    metadata.width as f32 * scale,
-                    metadata.height as f32 * scale,
+                ui.add_sized(
+                    available,
+                    egui::Image::new((texture.id(), texture.size_vec2())).fit_to_exact_size(available),
                 );
-                ui.image((texture.id(), display_size));
             } else {
                 ui.label("GIM texture error: preview cache is empty.");
             }

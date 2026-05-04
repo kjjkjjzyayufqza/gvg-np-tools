@@ -38,6 +38,7 @@ pub struct GpuMesh {
     wireframe_index_buffer: wgpu::Buffer,
     wireframe_index_count: u32,
     pub bounds: PreviewBounds,
+    pub focus_target: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -317,6 +318,7 @@ impl GpuRenderer {
         let started = std::time::Instant::now();
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+        let mut position_sum = [0.0f64; 3];
         let mut bounds = PreviewBounds {
             min: [f32::INFINITY; 3],
             max: [f32::NEG_INFINITY; 3],
@@ -329,6 +331,7 @@ impl GpuRenderer {
                 for (axis, val) in pos.iter().enumerate() {
                     bounds.min[axis] = bounds.min[axis].min(*val);
                     bounds.max[axis] = bounds.max[axis].max(*val);
+                    position_sum[axis] += *val as f64;
                 }
                 vertices.push(GpuVertex {
                     position: pos,
@@ -376,6 +379,13 @@ impl GpuRenderer {
             started.elapsed().as_millis()
         );
 
+        let vertex_count = vertices.len() as f64;
+        let focus_target = [
+            (position_sum[0] / vertex_count) as f32,
+            (position_sum[1] / vertex_count) as f32,
+            (position_sum[2] / vertex_count) as f32,
+        ];
+
         Some(GpuMesh {
             vertex_buffer,
             index_buffer,
@@ -384,6 +394,7 @@ impl GpuRenderer {
             wireframe_index_buffer,
             wireframe_index_count: wireframe_indices.len() as u32,
             bounds,
+            focus_target,
         })
     }
 
