@@ -693,9 +693,6 @@ pub fn extract_per_bone_meshes(pmf2_data: &[u8], swap_yz: bool) -> ExtractedPmf2
                 continue;
             }
             let count = dc.vertex_count;
-            if dc.vaddr + vs * count > pmf2_data.len() {
-                continue;
-            }
 
             let raw_verts: Vec<ParsedVertex>;
             if vt.idx_fmt > 0 && dc.iaddr > 0 {
@@ -746,6 +743,9 @@ pub fn extract_per_bone_meshes(pmf2_data: &[u8], swap_yz: bool) -> ExtractedPmf2
                 }
                 raw_verts = rv;
             } else {
+                if dc.vaddr + vs * count > pmf2_data.len() {
+                    continue;
+                }
                 let mut rv = Vec::new();
                 let mut valid = true;
                 for vi in 0..count {
@@ -996,13 +996,11 @@ fn triangle_prim_chunks_with_limit(
     chunks
 }
 
-fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
+fn encode_vertices_i16(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<EncodedVertex> {
     let sx = bbox[0] / 32768.0;
     let sy = bbox[1] / 32768.0;
     let sz = bbox[2] / 32768.0;
-
-    let verts_i16: Vec<EncodedVertex> = mesh
-        .local_vertices
+    mesh.local_vertices
         .iter()
         .map(|lv| {
             let px = if sx > 0.0 {
@@ -1027,8 +1025,37 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
             let nnz = clamp_i16((lv[7] * 32767.0).round() as i32);
             (tu, tv, nnx, nny, nnz, px, py, pz)
         })
-        .collect();
+        .collect()
+}
 
+fn serialize_vertex_buf(
+    verts: &[EncodedVertex],
+    has_uv: bool,
+    has_normals: bool,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for vtx in verts {
+        if has_uv {
+            buf.extend_from_slice(&vtx.0.to_le_bytes());
+            buf.extend_from_slice(&vtx.1.to_le_bytes());
+        }
+        if has_normals {
+            buf.extend_from_slice(&vtx.2.to_le_bytes());
+            buf.extend_from_slice(&vtx.3.to_le_bytes());
+            buf.extend_from_slice(&vtx.4.to_le_bytes());
+        }
+        buf.extend_from_slice(&vtx.5.to_le_bytes());
+        buf.extend_from_slice(&vtx.6.to_le_bytes());
+        buf.extend_from_slice(&vtx.7.to_le_bytes());
+    }
+    while buf.len() % 4 != 0 {
+        buf.push(0);
+    }
+    buf
+}
+
+fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
+    let verts_i16 = encode_vertices_i16(mesh, bbox);
     let mut seq_verts = Vec::new();
     for f in &mesh.faces {
         for &idx in &[f[0], f[1], f[2]] {
@@ -1049,54 +1076,76 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
         vtype |= 2 << 5;
     }
     vtype |= 2 << 7;
+    vtype |= 2 << 11;
+
+    let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
+        let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
+        buf.extend_from_slice(&word.to_le_bytes());
+    };
 
     let chunks = triangle_prim_chunks(seq_verts.len());
     if chunks.is_empty() {
         return Vec::new();
     }
-    let num_cmds = 2 + chunks.len() * 4 + 1;
-    let cmd_block_size = num_cmds * 4;
 
-    let mut vert_buf = Vec::new();
-    for vtx in &seq_verts {
-        if mesh.has_uv {
-            vert_buf.extend_from_slice(&vtx.0.to_le_bytes());
-            vert_buf.extend_from_slice(&vtx.1.to_le_bytes());
+    let num_cmds = 2 + chunks.len() * 5 + 1;
+    let cmd_block_size = num_cmds * 4;
+    let mut data_chunks = Vec::with_capacity(chunks.len());
+    let mut chunk_offsets = Vec::with_capacity(chunks.len());
+    let mut data_offset = cmd_block_size;
+
+    for (start, count) in &chunks {
+        let mut unique_verts: Vec<EncodedVertex> = Vec::new();
+        let mut vert_map: HashMap<EncodedVertex, u16> = HashMap::new();
+        let mut indices: Vec<u16> = Vec::with_capacity(*count);
+        for &vtx in &seq_verts[*start..*start + *count] {
+            let uidx = *vert_map.entry(vtx).or_insert_with(|| {
+                let i = unique_verts.len() as u16;
+                unique_verts.push(vtx);
+                i
+            });
+            indices.push(uidx);
         }
-        if mesh.has_normals {
-            vert_buf.extend_from_slice(&vtx.2.to_le_bytes());
-            vert_buf.extend_from_slice(&vtx.3.to_le_bytes());
-            vert_buf.extend_from_slice(&vtx.4.to_le_bytes());
+
+        let vert_buf = serialize_vertex_buf(&unique_verts, mesh.has_uv, mesh.has_normals);
+        let mut idx_buf = Vec::new();
+        for &idx in &indices {
+            idx_buf.extend_from_slice(&idx.to_le_bytes());
         }
-        vert_buf.extend_from_slice(&vtx.5.to_le_bytes());
-        vert_buf.extend_from_slice(&vtx.6.to_le_bytes());
-        vert_buf.extend_from_slice(&vtx.7.to_le_bytes());
-    }
-    while vert_buf.len() % 4 != 0 {
-        vert_buf.push(0);
+        while idx_buf.len() % 4 != 0 {
+            idx_buf.push(0);
+        }
+
+        let vbuf_offset = data_offset;
+        let ibuf_offset = data_offset + vert_buf.len();
+        data_offset = ibuf_offset + idx_buf.len();
+        chunk_offsets.push((vbuf_offset, ibuf_offset, indices.len()));
+        data_chunks.push((vert_buf, idx_buf));
     }
 
     let mut ge = Vec::new();
-    let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
-        let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
-        buf.extend_from_slice(&word.to_le_bytes());
-    };
     push_cmd(&mut ge, 0x14, 0);
     push_cmd(&mut ge, 0x10, 0);
-    let vertex_size = VtypeInfo::decode(vtype).vertex_size();
-    for (start, count) in &chunks {
-        let vaddr = cmd_block_size + start * vertex_size;
-        push_cmd(&mut ge, 0x01, vaddr as u32);
+    for (vbuf_offset, ibuf_offset, index_count) in &chunk_offsets {
+        push_cmd(&mut ge, 0x01, *vbuf_offset as u32);
         push_cmd(&mut ge, 0x12, vtype);
+        push_cmd(&mut ge, 0x02, *ibuf_offset as u32);
         push_cmd(&mut ge, 0x9B, 0);
-        push_cmd(&mut ge, 0x04, (PRIM_TRIANGLES as u32) << 16 | *count as u32);
+        push_cmd(
+            &mut ge,
+            0x04,
+            (PRIM_TRIANGLES as u32) << 16 | *index_count as u32,
+        );
     }
     push_cmd(&mut ge, 0x0B, 0);
 
     while ge.len() < cmd_block_size {
         ge.extend_from_slice(&[0, 0, 0, 0]);
     }
-    ge.extend_from_slice(&vert_buf);
+    for (vert_buf, idx_buf) in data_chunks {
+        ge.extend_from_slice(&vert_buf);
+        ge.extend_from_slice(&idx_buf);
+    }
     ge
 }
 
@@ -2323,6 +2372,70 @@ mod tests {
     }
 
     #[test]
+    fn build_ge_commands_indexes_each_chunk_when_global_unique_vertices_exceed_u16() {
+        let face_count = 22_000;
+        let mut local_vertices = Vec::with_capacity(face_count * 3);
+        let mut faces = Vec::with_capacity(face_count);
+        for face_idx in 0..face_count {
+            let base = local_vertices.len();
+            for corner in 0..3 {
+                let vertex_id = face_idx * 3 + corner;
+                let u = (vertex_id % 257) as f32 / 257.0;
+                let v = ((vertex_id / 257) % 257) as f32 / 257.0;
+                local_vertices.push([
+                    corner as f32,
+                    (face_idx % 3) as f32,
+                    0.0,
+                    u,
+                    v,
+                    0.0,
+                    1.0,
+                    0.0,
+                ]);
+            }
+            faces.push([base, base + 1, base + 2]);
+        }
+        let mesh = BoneMeshMeta {
+            bone_index: 0,
+            bone_name: "root".to_string(),
+            vertex_count: local_vertices.len(),
+            face_count,
+            has_uv: true,
+            has_normals: true,
+            draw_call_vtypes: Vec::new(),
+            local_vertices,
+            faces,
+        };
+        let unique_encoded = encode_vertices_i16(&mesh, &[4.0, 4.0, 2.0])
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert!(unique_encoded > u16::MAX as usize);
+
+        let ge_data = build_ge_commands(&mesh, &[4.0, 4.0, 2.0]);
+        let words = ge_data
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .take_while(|word| (((*word >> 24) & 0xFF) as u8) != GE_CMD_RET)
+            .collect::<Vec<_>>();
+        let prim_count = words
+            .iter()
+            .filter(|word| (((**word >> 24) & 0xFF) as u8) == GE_CMD_PRIM)
+            .count();
+        let iaddr_count = words
+            .iter()
+            .filter(|word| (((**word >> 24) & 0xFF) as u8) == GE_CMD_IADDR)
+            .count();
+
+        assert!(prim_count > 1, "test mesh should be split into multiple chunks");
+        assert_eq!(iaddr_count, prim_count, "every chunk must use indexed drawing");
+        assert!(words.iter().any(|word| {
+            (((*word >> 24) & 0xFF) as u8) == GE_CMD_VERTEXTYPE
+                && (((word & 0xFFFFFF) >> 11) & 3) == 2
+        }));
+    }
+
+    #[test]
     fn build_ge_commands_uses_native_bbox_zero_before_prim() {
         let mesh = test_mesh("root", 1);
         let ge_data = build_ge_commands(&mesh, &[2.0, 2.0, 2.0]);
@@ -2336,6 +2449,97 @@ mod tests {
             .unwrap();
 
         assert_eq!(words[prim_pos - 1], 0x9B000000);
+    }
+
+    #[test]
+    fn build_ge_commands_uses_indexed_format() {
+        let mesh = test_mesh("root", 2);
+        let ge_data = build_ge_commands(&mesh, &[2.0, 2.0, 2.0]);
+        let words: Vec<u32> = ge_data
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect();
+
+        let has_iaddr = words
+            .iter()
+            .any(|w| ((*w >> 24) & 0xFF) as u8 == GE_CMD_IADDR);
+        assert!(has_iaddr, "must emit IADDR for indexed drawing");
+
+        let vtype_word = words
+            .iter()
+            .find(|w| ((**w >> 24) & 0xFF) as u8 == GE_CMD_VERTEXTYPE)
+            .unwrap();
+        let vtype = vtype_word & 0xFFFFFF;
+        let idx_fmt = (vtype >> 11) & 3;
+        assert_eq!(idx_fmt, 2, "VTYPE must have 16-bit index format");
+    }
+
+    #[test]
+    fn build_ge_commands_deduplicates_shared_vertices() {
+        let mut mesh = test_mesh("root", 2);
+        mesh.faces = vec![mesh.faces[0], mesh.faces[0]];
+        mesh.face_count = 2;
+        let ge_data = build_ge_commands(&mesh, &[2.0, 2.0, 2.0]);
+
+        let words: Vec<u32> = ge_data
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect();
+        let vtype_word = words
+            .iter()
+            .find(|w| ((**w >> 24) & 0xFF) as u8 == GE_CMD_VERTEXTYPE)
+            .unwrap()
+            & 0xFFFFFF;
+        let vertex_size = VtypeInfo::decode(vtype_word).vertex_size();
+
+        let vaddr_word = words
+            .iter()
+            .find(|w| ((**w >> 24) & 0xFF) as u8 == GE_CMD_VADDR)
+            .unwrap();
+        let vbuf_offset = (vaddr_word & 0xFFFFFF) as usize;
+        let iaddr_word = words
+            .iter()
+            .find(|w| ((**w >> 24) & 0xFF) as u8 == GE_CMD_IADDR)
+            .unwrap();
+        let ibuf_offset = (iaddr_word & 0xFFFFFF) as usize;
+
+        let vert_buf_size = ibuf_offset - vbuf_offset;
+        let unique_count = vert_buf_size / vertex_size;
+        assert_eq!(unique_count, 3, "2 identical faces share 3 unique vertices");
+
+        let prim_word = words
+            .iter()
+            .find(|w| ((**w >> 24) & 0xFF) as u8 == GE_CMD_PRIM)
+            .unwrap();
+        let index_count = (prim_word & 0xFFFF) as usize;
+        assert_eq!(index_count, 6, "2 faces = 6 indices");
+    }
+
+    #[test]
+    fn build_ge_indexed_round_trips_through_extract() {
+        let mesh = test_mesh("root", 4);
+
+        let meta = Pmf2Meta {
+            model_name: "test".to_string(),
+            bbox: [2.0, 2.0, 2.0],
+            section_count: 1,
+            sections: vec![BoneSection {
+                index: 0,
+                name: "root".to_string(),
+                offset: 0,
+                size: 0,
+                local_matrix: identity(),
+                parent: -1,
+                has_mesh: true,
+                origin_offset: None,
+                category: String::new(),
+            }],
+            bone_meshes: vec![mesh],
+        };
+        let pmf2 = rebuild_pmf2(&meta);
+        let (meshes, _, _, _) = extract_per_bone_meshes(&pmf2, false);
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].faces.len(), 4);
     }
 
     #[test]
