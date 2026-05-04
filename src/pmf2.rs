@@ -1028,11 +1028,7 @@ fn encode_vertices_i16(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<EncodedVerte
         .collect()
 }
 
-fn serialize_vertex_buf(
-    verts: &[EncodedVertex],
-    has_uv: bool,
-    has_normals: bool,
-) -> Vec<u8> {
+fn serialize_vertex_buf(verts: &[EncodedVertex], has_uv: bool, has_normals: bool) -> Vec<u8> {
     let mut buf = Vec::new();
     for vtx in verts {
         if has_uv {
@@ -2427,8 +2423,14 @@ mod tests {
             .filter(|word| (((**word >> 24) & 0xFF) as u8) == GE_CMD_IADDR)
             .count();
 
-        assert!(prim_count > 1, "test mesh should be split into multiple chunks");
-        assert_eq!(iaddr_count, prim_count, "every chunk must use indexed drawing");
+        assert!(
+            prim_count > 1,
+            "test mesh should be split into multiple chunks"
+        );
+        assert_eq!(
+            iaddr_count, prim_count,
+            "every chunk must use indexed drawing"
+        );
         assert!(words.iter().any(|word| {
             (((*word >> 24) & 0xFF) as u8) == GE_CMD_VERTEXTYPE
                 && (((word & 0xFFFFFF) >> 11) & 3) == 2

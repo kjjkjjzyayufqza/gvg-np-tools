@@ -6,6 +6,10 @@ Optimize the DAE → PMF2 converter to produce indexed triangle display lists
 instead of unindexed triangles, reducing vertex data and improving in-game
 rendering performance on PSP hardware.
 
+Additional follow-up: investigate and optimize GVG tools 3D preview
+performance for high-face-count PMF2 models, using `ssbh_editor` /
+`ssbh_wgpu` as the reference implementation.
+
 ## Tasks
 
 ### Phase 1: Indexed Triangle Output
@@ -39,10 +43,10 @@ rendering performance on PSP hardware.
 
 ### Phase 3: Triangle Strip Conversion (FUTURE)
 
-- [ ] 3.1 Implement triangle list → triangle strip conversion (stripify).
-- [ ] 3.2 Handle degenerate triangles for strip joins.
-- [ ] 3.3 Change PRIM type from TRIANGLES (3) to TRIANGLE_STRIP (4), where safe.
-- [ ] 3.4 Add unit tests for strip output and degenerate handling.
+- [x] 3.1 Implement triangle list → triangle strip conversion (stripify).
+- [x] 3.2 Handle degenerate triangles for strip joins.
+- [x] 3.3 Change PRIM type from TRIANGLES (3) to TRIANGLE_STRIP (4), where safe.
+- [x] 3.4 Add unit tests for strip output and degenerate handling.
 
 ### Phase 4: Validation
 
@@ -57,5 +61,19 @@ rendering performance on PSP hardware.
 
 - Phase 1: COMPLETE
 - Phase 2: COMPLETE
-- Phase 3: NOT STARTED (deferred — stripification after chunk-local indexing)
+- Phase 3: COMPLETE
 - Phase 4: PARTIAL (automated tests done, actual user model analyzed)
+
+## 3D Preview Follow-up
+
+- [x] Read current GVG preview design and GPU renderer code.
+- [x] Compare against `ssbh_editor` and `ssbh_wgpu` rendering architecture.
+- [x] Identify likely preview-side bottlenecks:
+      per-repaint off-screen render, per-frame wireframe index/buffer rebuild,
+      synchronous high-poly mesh extraction/upload.
+- [x] Implement first optimization: persistent wireframe path
+      (cached line index buffer or `PolygonMode::Line` pipeline).
+- [x] Add lightweight upload timing/count logs for GPU mesh and cached wireframe indices.
+- [x] Add FPS display and throttled render-frame debug logs.
+- [x] Cache PMF2 inspector summary to avoid re-extracting 231k vertices every frame.
+- [ ] Re-test with the user high-poly PMF2/DAE case in release mode.

@@ -33,8 +33,19 @@ struct Uniforms {
 pub struct GpuMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+    vertex_count: u32,
     index_count: u32,
+    wireframe_index_buffer: wgpu::Buffer,
+    wireframe_index_count: u32,
     pub bounds: PreviewBounds,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GpuRenderStats {
+    pub encode_ms: f64,
+    pub submit_ms: f64,
+    pub total_ms: f64,
+    pub viewport_size: [u32; 2],
 }
 
 pub struct GpuLineMesh {
@@ -303,6 +314,7 @@ impl GpuRenderer {
     }
 
     pub fn upload_mesh(&self, device: &wgpu::Device, meshes: &[BoneMeshData]) -> Option<GpuMesh> {
+        let started = std::time::Instant::now();
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut bounds = PreviewBounds {
@@ -335,6 +347,8 @@ impl GpuRenderer {
             return None;
         }
 
+        let wireframe_indices = build_wireframe_indices(&indices);
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh_vb"),
             contents: bytemuck::cast_slice(&vertices),
@@ -347,10 +361,28 @@ impl GpuRenderer {
             usage: wgpu::BufferUsages::INDEX,
         });
 
+        let wireframe_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh_wire_ib"),
+            contents: bytemuck::cast_slice(&wireframe_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        eprintln!(
+            "[gpu] upload_mesh: meshes={}, verts={}, tri_indices={}, wire_indices={}, elapsed_ms={}",
+            meshes.len(),
+            vertices.len(),
+            indices.len(),
+            wireframe_indices.len(),
+            started.elapsed().as_millis()
+        );
+
         Some(GpuMesh {
             vertex_buffer,
             index_buffer,
+            vertex_count: vertices.len() as u32,
             index_count: indices.len() as u32,
+            wireframe_index_buffer,
+            wireframe_index_count: wireframe_indices.len() as u32,
             bounds,
         })
     }
@@ -479,33 +511,20 @@ impl GpuRenderer {
         show_wireframe: bool,
         show_axes: bool,
         show_grid: bool,
-    ) {
+    ) -> Option<GpuRenderStats> {
+        let started = std::time::Instant::now();
         let color_view = match &self.color_view {
             Some(v) => v,
-            None => return,
+            None => return None,
         };
         let depth_view = match &self.depth_view {
             Some(v) => v,
-            None => return,
+            None => return None,
         };
 
         let [vw, vh] = self.viewport_size;
         let uniforms = build_uniforms(camera, vw, vh, texture_bind_group.is_some());
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
-        let wire_buf = if show_wireframe {
-            let wire_ib = build_wireframe_indices(mesh.index_count);
-            Some((
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("wire_ib"),
-                    contents: bytemuck::cast_slice(&wire_ib),
-                    usage: wgpu::BufferUsages::INDEX,
-                }),
-                wire_ib.len() as u32,
-            ))
-        } else {
-            None
-        };
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mesh_render"),
@@ -548,13 +567,16 @@ impl GpuRenderer {
             pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.index_count, 0, 0..1);
 
-            if let Some((ref buf, count)) = wire_buf {
+            if show_wireframe && mesh.wireframe_index_count > 0 {
                 pass.set_pipeline(&self.wireframe_pipeline);
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_bind_group(1, tex_bg, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..count, 0, 0..1);
+                pass.set_index_buffer(
+                    mesh.wireframe_index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..mesh.wireframe_index_count, 0, 0..1);
             }
 
             if show_grid {
@@ -572,7 +594,36 @@ impl GpuRenderer {
             }
         }
 
+        let encode_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let submit_started = std::time::Instant::now();
         queue.submit(std::iter::once(encoder.finish()));
+        let submit_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        Some(GpuRenderStats {
+            encode_ms,
+            submit_ms,
+            total_ms,
+            viewport_size: self.viewport_size,
+        })
+    }
+}
+
+impl GpuMesh {
+    pub fn vertex_count(&self) -> u32 {
+        self.vertex_count
+    }
+
+    pub fn face_count(&self) -> u32 {
+        self.index_count / 3
+    }
+
+    pub fn triangle_index_count(&self) -> u32 {
+        self.index_count
+    }
+
+    pub fn wireframe_index_count(&self) -> u32 {
+        self.wireframe_index_count
     }
 }
 
@@ -620,12 +671,11 @@ fn build_uniforms(camera: &PreviewCamera, vw: u32, vh: u32, has_texture: bool) -
     }
 }
 
-fn build_wireframe_indices(tri_index_count: u32) -> Vec<u32> {
-    let mut lines = Vec::with_capacity(tri_index_count as usize * 2);
-    let tri_count = tri_index_count / 3;
-    for t in 0..tri_count {
-        let base = t * 3;
-        lines.extend_from_slice(&[base, base + 1, base + 1, base + 2, base + 2, base]);
+fn build_wireframe_indices(triangle_indices: &[u32]) -> Vec<u32> {
+    let mut lines = Vec::with_capacity((triangle_indices.len() / 3) * 6);
+    for tri in triangle_indices.chunks_exact(3) {
+        let [a, b, c] = [tri[0], tri[1], tri[2]];
+        lines.extend_from_slice(&[a, b, b, c, c, a]);
     }
     lines
 }
@@ -825,5 +875,17 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
         [0.0; 3]
     } else {
         [v[0] / len, v[1] / len, v[2] / len]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_wireframe_indices;
+
+    #[test]
+    fn wireframe_indices_reuse_triangle_indices() {
+        let wire = build_wireframe_indices(&[2, 0, 1, 4, 5, 3]);
+
+        assert_eq!(wire, vec![2, 0, 0, 1, 1, 2, 4, 5, 5, 3, 3, 4]);
     }
 }

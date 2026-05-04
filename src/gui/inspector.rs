@@ -4,6 +4,90 @@ use crate::{
     workspace::{AssetKind, EntryValidation, ModWorkspace},
 };
 use eframe::egui;
+use std::time::Instant;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Pmf2SummaryCacheKey {
+    pub stream_index: usize,
+    pub pzz_revision: u64,
+    pub data_identity: u64,
+}
+
+#[derive(Default)]
+pub(super) struct Pmf2SummaryCache {
+    key: Option<Pmf2SummaryCacheKey>,
+    summary: Option<Pmf2Summary>,
+}
+
+struct Pmf2Summary {
+    sections: Vec<pmf2::BoneSection>,
+    bbox: [f32; 3],
+    mesh_count: usize,
+    drawable_count: usize,
+    safe_mesh_target_count: usize,
+    special_count: usize,
+    total_verts: usize,
+    total_faces: usize,
+}
+
+impl Pmf2SummaryCache {
+    pub(super) fn is_valid_for(&self, key: Pmf2SummaryCacheKey) -> bool {
+        self.key == Some(key)
+    }
+
+    fn ensure_summary(&mut self, key: Pmf2SummaryCacheKey, data: &[u8]) -> &Pmf2Summary {
+        if !self.is_valid_for(key) {
+            let started = Instant::now();
+            let (sections, bbox) = pmf2::parse_pmf2_sections(data);
+            let mesh_count = sections.iter().filter(|s| s.has_mesh).count();
+            let drawable_count = sections
+                .iter()
+                .filter(|section| pmf2::section_render_policy(section.index).draws)
+                .count();
+            let safe_mesh_target_count = sections
+                .iter()
+                .filter(|section| pmf2::section_render_policy(section.index).safe_mesh_target)
+                .count();
+            let special_count = sections
+                .iter()
+                .filter(|section| !pmf2::section_render_policy(section.index).safe_mesh_target)
+                .count();
+            let (meshes, _, _, _) = pmf2::extract_per_bone_meshes(data, false);
+            let total_verts = meshes.iter().map(|m| m.vertices.len()).sum();
+            let total_faces = meshes.iter().map(|m| m.faces.len()).sum();
+
+            self.key = Some(key);
+            self.summary = Some(Pmf2Summary {
+                sections,
+                bbox,
+                mesh_count,
+                drawable_count,
+                safe_mesh_target_count,
+                special_count,
+                total_verts,
+                total_faces,
+            });
+            eprintln!(
+                "[gui] cached PMF2 summary stream={} revision={} data=0x{:016X} verts={} faces={} in {:?}",
+                key.stream_index,
+                key.pzz_revision,
+                key.data_identity,
+                total_verts,
+                total_faces,
+                started.elapsed()
+            );
+        }
+
+        self.summary
+            .as_ref()
+            .expect("PMF2 summary cache populated after ensure")
+    }
+
+    #[cfg(test)]
+    fn store_test_key(&mut self, key: Pmf2SummaryCacheKey) {
+        self.key = Some(key);
+    }
+}
 
 pub fn show_inspector(
     ui: &mut egui::Ui,
@@ -11,6 +95,7 @@ pub fn show_inspector(
     selected_afs_entry: Option<usize>,
     selected_stream: Option<usize>,
     gim_cache: &mut GimPreviewCache,
+    pmf2_cache: &mut Pmf2SummaryCache,
 ) {
     ui.heading("Inspector");
     ui.separator();
@@ -24,6 +109,7 @@ pub fn show_inspector(
                     pzz.stream_data().get(stream_index),
                     pzz.revision(),
                     gim_cache,
+                    pmf2_cache,
                 );
                 return;
             }
@@ -66,6 +152,7 @@ fn show_stream_inspector(
     data: Option<&Vec<u8>>,
     pzz_revision: u64,
     gim_cache: &mut GimPreviewCache,
+    pmf2_cache: &mut Pmf2SummaryCache,
 ) {
     ui.strong(&stream.name);
     ui.separator();
@@ -79,55 +166,52 @@ fn show_stream_inspector(
     ui.separator();
 
     match stream.kind {
-        AssetKind::Pmf2 => show_pmf2_summary(ui, data),
+        AssetKind::Pmf2 => show_pmf2_summary(ui, stream.index, pzz_revision, data, pmf2_cache),
         AssetKind::Gim => show_gim_summary(ui, stream.index, pzz_revision, data, gim_cache),
         _ => show_raw_summary(ui, data),
     }
 }
 
-fn show_pmf2_summary(ui: &mut egui::Ui, data: &[u8]) {
+fn show_pmf2_summary(
+    ui: &mut egui::Ui,
+    stream_index: usize,
+    pzz_revision: u64,
+    data: &[u8],
+    cache: &mut Pmf2SummaryCache,
+) {
     ui.strong("PMF2 Summary");
-    let (sections, bbox) = pmf2::parse_pmf2_sections(data);
+    let key = Pmf2SummaryCacheKey {
+        stream_index,
+        pzz_revision,
+        data_identity: gim_data_identity(data),
+    };
+    let summary = cache.ensure_summary(key, data);
     labeled_row(
         ui,
         "BBox Scale",
-        &format!("{:.4}, {:.4}, {:.4}", bbox[0], bbox[1], bbox[2]),
+        &format!(
+            "{:.4}, {:.4}, {:.4}",
+            summary.bbox[0], summary.bbox[1], summary.bbox[2]
+        ),
     );
-    labeled_row(ui, "Sections", &format!("{}", sections.len()));
-    let mesh_count = sections.iter().filter(|s| s.has_mesh).count();
-    labeled_row(ui, "Bones with mesh", &format!("{}", mesh_count));
-
-    let drawable_count = sections
-        .iter()
-        .filter(|section| pmf2::section_render_policy(section.index).draws)
-        .count();
-    let safe_mesh_target_count = sections
-        .iter()
-        .filter(|section| pmf2::section_render_policy(section.index).safe_mesh_target)
-        .count();
-    let special_count = sections
-        .iter()
-        .filter(|section| !pmf2::section_render_policy(section.index).safe_mesh_target)
-        .count();
+    labeled_row(ui, "Sections", &format!("{}", summary.sections.len()));
+    labeled_row(ui, "Bones with mesh", &format!("{}", summary.mesh_count));
     labeled_row(
         ui,
         "Runtime drawable sections",
-        &format!("{}", drawable_count),
+        &format!("{}", summary.drawable_count),
     );
     labeled_row(
         ui,
         "Safe mesh targets",
         &format!(
             "{} safe, {} special/unsafe",
-            safe_mesh_target_count, special_count
+            summary.safe_mesh_target_count, summary.special_count
         ),
     );
 
-    let (meshes, _, _, _) = pmf2::extract_per_bone_meshes(data, false);
-    let total_verts: usize = meshes.iter().map(|m| m.vertices.len()).sum();
-    let total_faces: usize = meshes.iter().map(|m| m.faces.len()).sum();
-    labeled_row(ui, "Total vertices", &format!("{}", total_verts));
-    labeled_row(ui, "Total faces", &format!("{}", total_faces));
+    labeled_row(ui, "Total vertices", &format!("{}", summary.total_verts));
+    labeled_row(ui, "Total faces", &format!("{}", summary.total_faces));
 
     ui.separator();
     ui.strong("Runtime Render Policy");
@@ -151,7 +235,7 @@ fn show_pmf2_summary(ui: &mut egui::Ui, data: &[u8]) {
                     ui.strong("Import target");
                     ui.end_row();
 
-                    for section in &sections {
+                    for section in &summary.sections {
                         let policy = pmf2::section_render_policy(section.index);
                         ui.monospace(format!("{:02}", section.index));
                         ui.monospace(&section.name);
@@ -301,5 +385,37 @@ fn format_size(bytes: usize) -> String {
         format!("{} ({:.1} KB)", bytes, bytes as f64 / 1024.0)
     } else {
         format!("{} bytes", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Pmf2SummaryCache, Pmf2SummaryCacheKey};
+
+    #[test]
+    fn pmf2_summary_cache_key_hits_only_for_same_stream_revision_and_data() {
+        let mut cache = Pmf2SummaryCache::default();
+        let key = Pmf2SummaryCacheKey {
+            stream_index: 0,
+            pzz_revision: 7,
+            data_identity: 42,
+        };
+
+        assert!(!cache.is_valid_for(key));
+        cache.store_test_key(key);
+
+        assert!(cache.is_valid_for(key));
+        assert!(!cache.is_valid_for(Pmf2SummaryCacheKey {
+            stream_index: 1,
+            ..key
+        }));
+        assert!(!cache.is_valid_for(Pmf2SummaryCacheKey {
+            pzz_revision: 8,
+            ..key
+        }));
+        assert!(!cache.is_valid_for(Pmf2SummaryCacheKey {
+            data_identity: 43,
+            ..key
+        }));
     }
 }

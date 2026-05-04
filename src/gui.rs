@@ -9,7 +9,7 @@ mod status;
 
 use crate::{
     afs, dae,
-    gpu_renderer::{GpuMesh, GpuRenderer},
+    gpu_renderer::{GpuMesh, GpuRenderStats, GpuRenderer},
     pmf2, pzz,
     render::PreviewState,
     save::rebuild_pzz_payload_cached,
@@ -52,6 +52,7 @@ pub struct GvgModdingApp {
     preview_state: PreviewState,
     editors: EditorWindows,
     inspector_gim_cache: gim_preview_cache::GimPreviewCache,
+    inspector_pmf2_cache: inspector::Pmf2SummaryCache,
     status: String,
     show_left_panel: bool,
     show_right_panel: bool,
@@ -60,6 +61,8 @@ pub struct GvgModdingApp {
     gpu_texture_bind_group: Option<wgpu::BindGroup>,
     gpu_mesh_stream_index: Option<usize>,
     gpu_mesh_pzz_revision: Option<u64>,
+    last_preview_render_stats: Option<GpuRenderStats>,
+    preview_debug_last_log: Option<Instant>,
     wgpu_state: Option<WgpuState>,
     recent_afs_paths: Vec<std::path::PathBuf>,
     last_dir_open_afs: Option<std::path::PathBuf>,
@@ -179,6 +182,7 @@ impl GvgModdingApp {
             preview_state: PreviewState::default(),
             editors: EditorWindows::default(),
             inspector_gim_cache: gim_preview_cache::GimPreviewCache::default(),
+            inspector_pmf2_cache: inspector::Pmf2SummaryCache::default(),
             status: "Ready".to_string(),
             show_left_panel: true,
             show_right_panel: true,
@@ -187,6 +191,8 @@ impl GvgModdingApp {
             gpu_texture_bind_group: None,
             gpu_mesh_stream_index: None,
             gpu_mesh_pzz_revision: None,
+            last_preview_render_stats: None,
+            preview_debug_last_log: None,
             wgpu_state,
             recent_afs_paths: persisted.recent_afs_paths.clone(),
             last_dir_open_afs: persisted.last_dir_open_afs,
@@ -262,6 +268,7 @@ impl eframe::App for GvgModdingApp {
                         self.tree_state.selected_afs_entry,
                         self.tree_state.selected_stream,
                         &mut self.inspector_gim_cache,
+                        &mut self.inspector_pmf2_cache,
                     );
                 });
         }
@@ -1216,41 +1223,51 @@ impl GvgModdingApp {
                 return;
             }
         };
-        let renderer = match &mut self.gpu_renderer {
-            Some(r) => r,
-            None => return,
-        };
 
         preview::preview_controls(ui, gpu_mesh, &mut self.preview_state);
+        let fps = preview_fps(ctx);
+        preview::preview_perf_label(
+            ui,
+            fps,
+            gpu_mesh,
+            self.last_preview_render_stats.map(|s| s.total_ms),
+        );
 
         let available = ui.available_size();
         let vw = (available.x as u32).max(1);
         let vh = (available.y as u32).max(1);
-
-        renderer.ensure_viewport(&rs.device, &mut rs.renderer.write(), vw, vh);
 
         let camera = *self
             .preview_state
             .camera
             .get_or_insert_with(|| crate::render::PreviewCamera::frame_bounds(gpu_mesh.bounds));
 
-        renderer.render(
-            &rs.device,
-            &rs.queue,
-            &camera,
-            gpu_mesh,
-            self.gpu_texture_bind_group.as_ref(),
-            self.preview_state.wireframe,
-            self.preview_state.visibility.show_axes,
-            self.preview_state.visibility.show_grid,
-        );
+        let (render_stats, texture_id) = {
+            let renderer = match &mut self.gpu_renderer {
+                Some(r) => r,
+                None => return,
+            };
+            renderer.ensure_viewport(&rs.device, &mut rs.renderer.write(), vw, vh);
+            let render_stats = renderer.render(
+                &rs.device,
+                &rs.queue,
+                &camera,
+                gpu_mesh,
+                self.gpu_texture_bind_group.as_ref(),
+                self.preview_state.wireframe,
+                self.preview_state.visibility.show_axes,
+                self.preview_state.visibility.show_grid,
+            );
+            (render_stats, renderer.egui_texture_id)
+        };
+        self.last_preview_render_stats = render_stats;
 
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(vw as f32, vh as f32),
             egui::Sense::click_and_drag(),
         );
 
-        if let Some(texture_id) = renderer.egui_texture_id {
+        if let Some(texture_id) = texture_id {
             ui.painter().image(
                 texture_id,
                 rect,
@@ -1278,6 +1295,53 @@ impl GvgModdingApp {
                 ctx.request_repaint();
             }
         }
+        if let Some(stats) = render_stats {
+            let debug_counts = (
+                gpu_mesh.vertex_count(),
+                gpu_mesh.face_count(),
+                gpu_mesh.triangle_index_count(),
+                gpu_mesh.wireframe_index_count(),
+            );
+            self.log_preview_debug_if_due(
+                fps,
+                stats,
+                debug_counts.0,
+                debug_counts.1,
+                debug_counts.2,
+                debug_counts.3,
+            );
+        }
+    }
+
+    fn log_preview_debug_if_due(
+        &mut self,
+        fps: f32,
+        stats: GpuRenderStats,
+        vertex_count: u32,
+        face_count: u32,
+        triangle_index_count: u32,
+        wireframe_index_count: u32,
+    ) {
+        let now = Instant::now();
+        if self
+            .preview_debug_last_log
+            .is_some_and(|last| now.duration_since(last).as_millis() < 1000)
+        {
+            return;
+        }
+        self.preview_debug_last_log = Some(now);
+        eprintln!(
+            "[gpu] preview frame: fps={fps:.1}, viewport={}x{}, verts={}, faces={}, tri_indices={}, wire_indices={}, render_ms={:.2}, encode_ms={:.2}, submit_ms={:.2}",
+            stats.viewport_size[0],
+            stats.viewport_size[1],
+            vertex_count,
+            face_count,
+            triangle_index_count,
+            wireframe_index_count,
+            stats.total_ms,
+            stats.encode_ms,
+            stats.submit_ms
+        );
     }
 
     fn update_gpu_mesh(&mut self) {
@@ -1361,6 +1425,11 @@ fn gpu_mesh_cache_is_current(
     cached_stream_index == selected_stream
         && selected_stream.is_some()
         && cached_pzz_revision == current_pzz_revision
+}
+
+fn preview_fps(ctx: &egui::Context) -> f32 {
+    let dt = ctx.input(|i| i.stable_dt).max(1.0 / 240.0);
+    1.0 / dt
 }
 
 fn build_patched_afs_with_dirty_pzz_entry_clones(

@@ -234,3 +234,284 @@ cargo test --lib
 cargo check
   finished successfully
 ```
+
+## Stripify Implementation (2026-05-04)
+
+Implemented a conservative/aggressive hybrid stripifier for generated PMF2 mesh
+draws:
+
+```text
+per chunk:
+  deduplicate vertices into a local u16 vertex table
+  build local triangle faces
+  greedily extend strips through same-winding shared edges
+  join profitable disconnected strips with degenerate indices
+  if strip output is smaller and <= u16::MAX:
+      emit indexed TRIANGLE_STRIP
+  else:
+      emit indexed TRIANGLES
+```
+
+The fallback is important because scattered disconnected triangles can become
+larger after degenerate strip joins. In that case the converter keeps the
+chunk-local indexed `TRIANGLES` output from Phase 2.
+
+Added tests:
+
+```text
+stripify_turns_quad_triangles_into_four_index_strip
+stripify_uses_degenerate_indices_to_join_disconnected_strips
+stripify_preserves_winding_across_three_triangle_chain
+stripify_skips_single_triangle
+stripify_skips_when_disconnected_triangles_would_grow
+build_ge_commands_emits_triangle_strip_for_connected_mesh
+build_ge_commands_uses_degenerate_strip_for_two_disconnected_quads
+build_ge_commands_falls_back_to_triangles_when_strip_is_not_smaller
+build_ge_strip_output_round_trips_through_extract
+```
+
+Verification:
+
+```text
+cargo test --lib stripify
+  5 passed
+
+cargo test --lib build_ge_commands
+  8 passed
+
+cargo test --lib round_trips_through_extract
+  2 passed
+
+cargo test --lib
+  72 passed
+
+cargo check
+  finished successfully
+```
+
+## 3D Preview Performance Investigation (2026-05-04)
+
+User reported the GVG tools 3D preview becomes very sluggish with relatively
+high face counts (around 10k faces) and asked to compare against
+`E:\research\ssbh_editor`, which can display much larger scenes smoothly.
+
+### Evidence Gathered
+
+- Current `cargo run` was a dev/unoptimized GUI run (`target\debug\gvg_modding_tool.exe`).
+- Current preview already initializes wgpu and uploads selected PMF2 meshes:
+  `GPU mesh uploaded for stream 0: 52/53 bone meshes`.
+- User test history in the same terminal shows a patched stream with a dominant
+  `pl0a_m01` mesh around `73,455` faces, then repeated GPU mesh reuploads after
+  stream replacement.
+- Existing 3D preview design doc identified the old CPU renderer bottlenecks:
+  per-frame CPU projection, CPU triangle sorting, and egui shape drawing.
+  Those old bottlenecks were addressed by adding `src/gpu_renderer.rs`, but new
+  GPU-path bottlenecks remain.
+
+### Root-Cause Findings
+
+1. `src/gui.rs::show_3d_preview()` calls `GpuRenderer::render()` on every egui
+   repaint while the preview is visible. During camera drag/scroll this means a
+   full off-screen render, command encoder creation, and `queue.submit()` every
+   UI frame.
+2. `GpuRenderer::render()` rebuilds wireframe data every frame when wireframe is
+   enabled:
+   - allocates a new `Vec<u32>` via `build_wireframe_indices(mesh.index_count)`
+   - creates a new GPU index buffer with `device.create_buffer_init`
+   - then draws the wireframe pass
+   For 10k triangles this creates about 60k line indices per frame; for the
+   observed 73k-triangle mesh it creates about 440k line indices per frame.
+3. The current wireframe path uses `PrimitiveTopology::LineList` with a derived
+   index buffer, while `ssbh_wgpu` uses a persistent mesh index buffer and
+   `wgpu::PolygonMode::Line` for wireframe. That avoids per-frame CPU index
+   expansion and GPU buffer allocation.
+4. GVG stores one flattened `GpuMesh`, but upload still happens synchronously on
+   the UI thread after PMF2 extraction. This is acceptable for occasional stream
+   changes, but high-poly imports/replacements will visibly stall the UI.
+5. GVG uses off-screen texture registration and image presentation. `ssbh_editor`
+   uses `egui_wgpu::CallbackTrait` and renders via the eframe/egui render pass
+   integration, with long-lived renderer resources in callback resources. That
+   avoids extra per-preview `queue.submit()` and keeps most GPU resources
+   persistent.
+
+### ssbh_editor / ssbh_wgpu Patterns
+
+- `ssbh_editor` stores renderer state in egui callback resources and inserts an
+  `egui_wgpu::Callback` for the viewport.
+- `ssbh_wgpu::RenderModel` owns combined, persistent vertex/index buffers and
+  draws mesh slices using `RenderMesh.access`.
+- Wireframe rendering reuses the same mesh buffers and switches to a
+  `PolygonMode::Line` pipeline instead of building a separate line index buffer
+  every frame.
+- The renderer batches model rendering through `begin_render_models()` and
+  `end_render_models()` rather than rebuilding per-frame mesh resources.
+
+### Recommended Optimization Order
+
+1. Cache wireframe indices/buffer inside `GpuMesh`, or preferably switch to a
+   `PolygonMode::Line` wireframe pipeline when supported.
+2. Add render dirty-state so the off-screen preview only rerenders when camera,
+   viewport, mesh, texture, or render toggles change.
+3. Move render integration toward `egui_wgpu::CallbackTrait` like
+   `ssbh_editor`, so preview commands are recorded into egui's wgpu flow instead
+   of submitting immediately from UI code.
+4. Add timing instrumentation around PMF2 extraction, mesh upload, wireframe
+   buffer creation, and render submission to confirm the dominant cost before
+   and after changes.
+
+## 3D Preview Persistent Wireframe Implementation (2026-05-04)
+
+Implemented the first preview optimization in `src/gpu_renderer.rs`:
+
+- Added cached wireframe GPU resources to `GpuMesh`.
+- Changed `upload_mesh()` to build wireframe line indices once from the real
+  triangle index buffer and upload `mesh_wire_ib` alongside the normal mesh
+  buffers.
+- Changed `render()` to reuse `mesh.wireframe_index_buffer` instead of
+  allocating a `Vec<u32>` and creating a GPU index buffer every frame.
+- Fixed the wireframe index derivation to use actual triangle indices instead
+  of assuming every triangle references sequential vertex indices.
+- Added upload timing/count logging:
+  `meshes`, `verts`, `tri_indices`, `wire_indices`, `elapsed_ms`.
+
+Added regression:
+
+```text
+gpu_renderer::tests::wireframe_indices_reuse_triangle_indices
+```
+
+TDD / verification notes:
+
+```text
+cargo test --lib gpu_renderer::tests::wireframe_indices_reuse_triangle_indices
+  initially failed with E0308 because build_wireframe_indices still accepted
+  a triangle-index count instead of the real triangle index slice.
+
+cargo test --lib gpu_renderer::tests::wireframe_indices_reuse_triangle_indices
+  1 passed
+
+cargo fmt && cargo test --lib gpu_renderer && cargo check
+  skipped: current PowerShell does not support && command chaining.
+
+cargo fmt; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo test --lib gpu_renderer; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo check
+  gpu_renderer test passed
+  cargo check finished successfully
+
+cargo test --lib
+  64 passed
+  0 failed
+```
+
+## 3D Preview FPS / Debug Instrumentation (2026-05-04)
+
+Added preview-side diagnostics for the reported high-poly case:
+
+- `src/gui/preview.rs`
+  - Added a preview perf label that displays:
+    `FPS`, vertex count, face count, triangle index count, wireframe index count,
+    and the previous frame render time.
+  - Added regression:
+    `gui::preview::tests::preview_perf_line_includes_fps_and_mesh_counts`.
+- `src/gpu_renderer.rs`
+  - Added `GpuRenderStats` from `render()` with encode, submit, total render
+    CPU time, and viewport size.
+  - Added `GpuMesh` count accessors so UI/logging can report the actual uploaded
+    mesh counts.
+- `src/gui.rs`
+  - Stores the most recent preview render stats and shows them in the preview
+    panel.
+  - Logs one throttled line per second while preview is rendering:
+    `fps`, viewport, vertices, faces, triangle indices, wireframe indices,
+    `render_ms`, `encode_ms`, `submit_ms`.
+
+For the user-provided PMF2 summary, expected uploaded counts should be close to:
+
+```text
+verts ~= 231435
+faces ~= 77145
+tri_indices ~= 231435
+wire_indices ~= 462870
+```
+
+Verification:
+
+```text
+cargo test --lib gui::preview::tests::preview_perf_line_includes_fps_and_mesh_counts
+  initially failed because format_preview_perf_line did not exist yet.
+
+cargo test --lib gui::preview::tests::preview_perf_line_includes_fps_and_mesh_counts
+  1 passed
+
+cargo fmt; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo test --lib gpu_renderer gui::preview; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo check
+  skipped after cargo fmt: cargo test accepts only one filter argument.
+
+cargo test --lib gpu_renderer; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo test --lib gui::preview; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo check
+  gpu_renderer test passed
+  gui::preview test passed
+  cargo check finished successfully
+
+cargo test --lib
+  65 passed
+  0 failed
+```
+
+## 3D Preview Low FPS Root Cause Follow-up (2026-05-04)
+
+User provided live diagnostics:
+
+```text
+FPS ~= 7.3
+verts=231435
+faces=77145
+tri_indices=231435
+wire_indices=462870
+render_ms ~= 0.44
+encode_ms ~= 0.13
+submit_ms ~= 0.31
+```
+
+This showed the GPU preview render path was not the bottleneck. The frame only
+spent about half a millisecond in `GpuRenderer::render()`, but total UI cadence
+was around 7 FPS.
+
+Root cause found in `src/gui/inspector.rs`:
+
+- The right Inspector calls `show_pmf2_summary()` every egui frame.
+- `show_pmf2_summary()` called `pmf2::parse_pmf2_sections(data)` and, more
+  importantly, `pmf2::extract_per_bone_meshes(data, false)` every frame.
+- For the user's selected PMF2 this meant re-extracting about 231k vertices and
+  77k faces continuously just to redraw the right-side summary text.
+
+Implemented fix:
+
+- Added `Pmf2SummaryCache` keyed by stream index, PZZ revision, and data identity.
+- Added `Pmf2Summary` to store sections, bbox, mesh counts, render policy counts,
+  total vertices, and total faces.
+- Added one-time logging when the summary cache is rebuilt:
+  `[gui] cached PMF2 summary stream=... verts=... faces=... in ...`.
+- Added `inspector_pmf2_cache` to `GvgModdingApp` and passed it into the
+  inspector alongside the existing GIM preview cache.
+
+Added regression:
+
+```text
+gui::inspector::tests::pmf2_summary_cache_key_hits_only_for_same_stream_revision_and_data
+```
+
+Verification:
+
+```text
+cargo test --lib gui::inspector::tests::pmf2_summary_cache_key_hits_only_for_same_stream_revision_and_data
+  initially failed because Pmf2SummaryCache did not implement cache-key behavior.
+
+cargo test --lib gui::inspector::tests::pmf2_summary_cache_key_hits_only_for_same_stream_revision_and_data
+  1 passed
+
+cargo fmt; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo test --lib gui::inspector; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo check
+  inspector test passed
+  cargo check finished successfully
+
+cargo test --lib
+  66 passed
+  0 failed
+```
