@@ -23,4 +23,9 @@ ttf-parser = "0.25"
 dirs = "6"
 
 [profile.release]
-opt-level = 3
+# Smaller binary for distribution; compile time similar to `3` for most graphs.
+opt-level = "s"
+# Faster `cargo build --release` (less per-crate LLVM splitting); fine for this tool.
+codegen-units = 256
+# Remove debug/symbol tables from the linked binary (smaller artifact).
+strip = true

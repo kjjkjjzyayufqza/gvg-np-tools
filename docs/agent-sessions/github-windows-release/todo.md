@@ -2,8 +2,10 @@
 
 ## Status
 
-- [x] Add `.github/workflows/release-main.yml` — push to `main` builds `gvg_modding_tool.exe` and creates a GitHub Release with the binary.
+- [x] Workflow: `.github/workflows/release-master.yml` — push to `master` builds release, zips exe, publishes GitHub Release.
+- [x] `Cargo.toml` `[profile.release]`: `opt-level = "s"`, `codegen-units = 256`, `strip = true`.
 
 ## Notes
 
-- Tag pattern: `main-build-<run_number>-<run_id>` (unique per workflow run).
+- Tag pattern: `master-build-<run_number>-<run_id>`.
+- CI sets `RUSTFLAGS` with MSVC `/OPT:REF` and `/OPT:ICF` for a smaller linked binary.

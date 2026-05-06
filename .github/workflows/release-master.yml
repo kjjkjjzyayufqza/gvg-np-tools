@@ -1,0 +1,68 @@
+# Build Windows release binary and publish a GitHub Release on every push to master.
+name: Release (master, Windows exe)
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-master-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Faster dependency resolution; default on recent toolchains but harmless to set.
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  # MSVC: dead-code removal + COMDAT folding (smaller exe, often faster link than /DEBUG-heavy layouts).
+  RUSTFLAGS: -C link-arg=/OPT:REF -C link-arg=/OPT:ICF
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+
+      - name: Build release (gvg_modding_tool)
+        run: cargo build --release --locked --bin gvg_modding_tool
+
+      - name: Package zip (smaller download than raw exe for many clients)
+        shell: pwsh
+        run: |
+          $zip = "gvg_modding_tool-windows-x86_64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -LiteralPath "target/release/gvg_modding_tool.exe" -DestinationPath $zip -CompressionLevel Optimal
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gvg_modding_tool-windows-x86_64
+          path: gvg_modding_tool-windows-x86_64.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: master-build-${{ github.run_number }}-${{ github.run_id }}
+          name: Master build ${{ github.run_number }} (${{ github.sha }})
+          generate_release_notes: true
+          # Single asset: compressed exe keeps the Release page small; unzip to run.
+          files: gvg_modding_tool-windows-x86_64.zip
