@@ -7,6 +7,8 @@ pub enum TreeAction {
     OpenPzz(usize),
     SelectStream(usize),
     ExportEntryRaw(usize),
+    ExportDecryptedPzz(usize),
+    ExportPzzStreams(usize),
     ExportStreamDae(usize),
     ReplaceStreamDae(usize),
     ReplaceStreamPmf2(usize),
@@ -17,6 +19,10 @@ pub enum TreeAction {
     OpenPmf2Data(usize),
     OpenGimPreview(usize),
     OpenHexView(usize),
+    OpenHexViewEntry(usize),
+    DumpAfsToFolder,
+    AddEntry,
+    DeleteEntry(usize),
 }
 
 pub struct AssetTreeState {
@@ -54,6 +60,8 @@ pub fn show_asset_tree(
 
     let filter_lower = state.search_filter.to_lowercase();
     let has_filter = !filter_lower.is_empty();
+
+    let has_afs_root = !entries.is_empty();
 
     let mut rows: Vec<TreeRow> = Vec::new();
 
@@ -106,8 +114,29 @@ pub fn show_asset_tree(
     let row_height = 20.0;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show_rows(ui, row_height, rows.len(), |ui, row_range| {
-            for row in &rows[row_range] {
+        .show_rows(ui, row_height, rows.len() + if has_afs_root { 1 } else { 0 }, |ui, row_range| {
+            for row_idx in row_range {
+                if has_afs_root && row_idx == 0 {
+                    let root_label = format!(
+                        "{} ({} entries)",
+                        workspace.afs_filename(),
+                        workspace.afs_entry_count()
+                    );
+                    let response = ui.selectable_label(false, egui::RichText::new(root_label).strong());
+                    response.context_menu(|ui| {
+                        if ui.button("Dump AFS to Folder...").clicked() {
+                            actions.push(TreeAction::DumpAfsToFolder);
+                            ui.close();
+                        }
+                        if ui.button("Add Entry...").clicked() {
+                            actions.push(TreeAction::AddEntry);
+                            ui.close();
+                        }
+                    });
+                    continue;
+                }
+                let data_idx = if has_afs_root { row_idx - 1 } else { row_idx };
+                let Some(row) = rows.get(data_idx) else { continue };
                 match row {
                     TreeRow::AfsEntry {
                         index,
@@ -132,10 +161,9 @@ pub fn show_asset_tree(
                         };
                         let dirty_mark = if *dirty { " *" } else { "" };
                         let label = format!(
-                            "{}{}#{:04} {} ({}){}",
+                            "{}{}{} ({}){}",
                             validation_icon,
                             expand_icon,
-                            index,
                             name,
                             format_size(*size),
                             dirty_mark
@@ -204,6 +232,25 @@ fn afs_entry_context_menu(
     }
     if ui.button("Export Raw").clicked() {
         actions.push(TreeAction::ExportEntryRaw(index));
+        ui.close();
+    }
+    if kind == AssetKind::Pzz {
+        if ui.button("Export Decrypted PZZ").clicked() {
+            actions.push(TreeAction::ExportDecryptedPzz(index));
+            ui.close();
+        }
+        if ui.button("Export PZZ Streams...").clicked() {
+            actions.push(TreeAction::ExportPzzStreams(index));
+            ui.close();
+        }
+    }
+    if ui.button("Delete Entry").clicked() {
+        actions.push(TreeAction::DeleteEntry(index));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("View Hex").clicked() {
+        actions.push(TreeAction::OpenHexViewEntry(index));
         ui.close();
     }
 }

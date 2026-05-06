@@ -463,6 +463,70 @@ pub fn patch_entries_bytes(original: &[u8], replacements: &[(usize, &[u8])]) -> 
     Ok(result)
 }
 
+pub struct AfsRebuildEntry {
+    pub data: Vec<u8>,
+    pub name: Option<String>,
+}
+
+pub fn rebuild_afs(entries: &[AfsRebuildEntry]) -> Result<Vec<u8>> {
+    let file_count = entries.len();
+    if file_count == 0 {
+        bail!("cannot build AFS with zero entries");
+    }
+
+    let header_size = 8 + file_count * 8 + 8;
+    let data_start = align_up(header_size, 2048);
+
+    let mut offsets = Vec::with_capacity(file_count);
+    let mut cursor = data_start;
+    for entry in entries {
+        offsets.push(cursor);
+        cursor += align_up(entry.data.len().max(1), 2048);
+    }
+
+    let name_table_offset = cursor;
+    let name_table_size = file_count * 0x30;
+    let total_size = name_table_offset + name_table_size;
+
+    let mut result = vec![0u8; total_size];
+
+    result[0..4].copy_from_slice(b"AFS\0");
+    result[4..8].copy_from_slice(&(file_count as u32).to_le_bytes());
+
+    for (i, entry) in entries.iter().enumerate() {
+        let table_pos = 8 + i * 8;
+        result[table_pos..table_pos + 4].copy_from_slice(&(offsets[i] as u32).to_le_bytes());
+        result[table_pos + 4..table_pos + 8]
+            .copy_from_slice(&(entry.data.len() as u32).to_le_bytes());
+    }
+
+    let name_table_ptr_pos = 8 + file_count * 8;
+    result[name_table_ptr_pos..name_table_ptr_pos + 4]
+        .copy_from_slice(&(name_table_offset as u32).to_le_bytes());
+    result[name_table_ptr_pos + 4..name_table_ptr_pos + 8]
+        .copy_from_slice(&(name_table_size as u32).to_le_bytes());
+
+    for (i, entry) in entries.iter().enumerate() {
+        let offset = offsets[i];
+        let end = offset + entry.data.len();
+        result[offset..end].copy_from_slice(&entry.data);
+    }
+
+    for (i, entry) in entries.iter().enumerate() {
+        let row_offset = name_table_offset + i * 0x30;
+        if let Some(name) = &entry.name {
+            let name_bytes = name.as_bytes();
+            let copy_len = name_bytes.len().min(0x20);
+            result[row_offset..row_offset + copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        }
+        let size_offset = row_offset + 0x2C;
+        result[size_offset..size_offset + 4]
+            .copy_from_slice(&(entry.data.len() as u32).to_le_bytes());
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +611,41 @@ mod tests {
         );
         assert_eq!(inventory.entries[2].size, b"e2".len());
         assert_eq!(inventory.entries[3].size, b"entry3-original".len());
+    }
+
+    #[test]
+    fn rebuild_afs_produces_valid_archive_readable_by_scan_inventory() {
+        let entries = vec![
+            AfsRebuildEntry {
+                data: b"hello_entry_0".to_vec(),
+                name: Some("test0.pzz".to_string()),
+            },
+            AfsRebuildEntry {
+                data: b"second_entry_data_longer".to_vec(),
+                name: Some("test1.bin".to_string()),
+            },
+            AfsRebuildEntry {
+                data: vec![0xAA; 4096],
+                name: None,
+            },
+        ];
+        let afs = rebuild_afs(&entries).unwrap();
+
+        let inventory = scan_inventory(&afs, Some("rebuilt.bin".to_string())).unwrap();
+        assert_eq!(inventory.entries.len(), 3);
+        assert_eq!(inventory.entries[0].size, b"hello_entry_0".len());
+        assert_eq!(inventory.entries[1].size, b"second_entry_data_longer".len());
+        assert_eq!(inventory.entries[2].size, 4096);
+
+        assert_eq!(inventory.entries[0].name, Some("test0.pzz".to_string()));
+        assert_eq!(inventory.entries[1].name, Some("test1.bin".to_string()));
+        assert_eq!(inventory.entries[2].name, None);
+
+        let d0 = &afs[inventory.entries[0].offset..inventory.entries[0].offset + inventory.entries[0].size];
+        assert_eq!(d0, b"hello_entry_0");
+        let d1 = &afs[inventory.entries[1].offset..inventory.entries[1].offset + inventory.entries[1].size];
+        assert_eq!(d1, b"second_entry_data_longer");
+        let d2 = &afs[inventory.entries[2].offset..inventory.entries[2].offset + inventory.entries[2].size];
+        assert_eq!(d2, &vec![0xAA; 4096]);
     }
 }

@@ -158,6 +158,28 @@ impl ModWorkspace {
         &self.afs_entries
     }
 
+    pub fn afs_filename(&self) -> &str {
+        self.afs_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("(untitled)")
+    }
+
+    pub fn afs_entry_count(&self) -> usize {
+        self.afs_entries.len()
+    }
+
+    pub fn rename_entry(&mut self, index: usize, new_name: String) -> bool {
+        if let Some(entry) = self.afs_entries.iter_mut().find(|e| e.index == index) {
+            if entry.name != new_name {
+                entry.name = new_name;
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn afs_path(&self) -> Option<&PathBuf> {
         self.afs_path.as_ref()
     }

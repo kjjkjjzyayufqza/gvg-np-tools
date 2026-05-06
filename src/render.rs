@@ -165,6 +165,27 @@ impl PreviewCamera {
         self.distance = (self.distance * (1.0 + delta)).max(0.05);
     }
 
+    pub fn pan(&mut self, delta_x: f32, delta_y: f32) {
+        let basis = self.basis();
+        let scale = self.distance * 0.002;
+        self.target[0] += basis.right[0] * delta_x * scale + basis.up[0] * delta_y * scale;
+        self.target[1] += basis.right[1] * delta_x * scale + basis.up[1] * delta_y * scale;
+        self.target[2] += basis.right[2] * delta_x * scale + basis.up[2] * delta_y * scale;
+    }
+
+    pub fn reset_view() -> Self {
+        let fov_y_radians = 45.0_f32.to_radians();
+        Self {
+            target: [0.0, 0.0, 0.0],
+            yaw: std::f32::consts::PI + 0.35,
+            pitch: -0.28,
+            distance: 50.0,
+            fov_y_radians,
+            near: 0.01,
+            far: 100_000.0,
+        }
+    }
+
     fn basis(&self) -> CameraBasis {
         let cos_pitch = self.pitch.cos();
         let forward = normalize([

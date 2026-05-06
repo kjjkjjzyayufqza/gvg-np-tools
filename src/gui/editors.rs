@@ -71,12 +71,26 @@ pub struct CwCheatEditorState {
     pub text: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HexViewTarget {
+    Stream(usize),
+    AfsEntry(usize),
+}
+
+#[derive(Clone, Debug)]
+pub struct HexViewerState {
+    pub target: HexViewTarget,
+    pub selection_start: Option<usize>,
+    pub selection_end: Option<usize>,
+    pub cached_data: Option<Vec<u8>>,
+}
+
 #[derive(Default)]
 pub struct EditorWindows {
     pub pmf2_metadata: Option<usize>,
     pub pmf2_data: Option<usize>,
     pub gim_preview: Option<usize>,
-    pub hex_view: Option<usize>,
+    pub hex_views: Vec<HexViewerState>,
     pub save_planner: bool,
     pub cwcheat_editor: bool,
     pmf2_metadata_state: Option<Pmf2MetadataEditorState>,
@@ -237,18 +251,35 @@ pub fn show_editor_windows(
         }
     }
 
-    if let Some(stream_index) = editors.hex_view {
+    let mut hex_views_to_close = Vec::new();
+    for (view_idx, hex_state) in editors.hex_views.iter_mut().enumerate() {
         let mut open = true;
-        egui::Window::new(format!("Hex View - stream{:03}", stream_index))
+        let title = match &hex_state.target {
+            HexViewTarget::Stream(idx) => format!("Hex View - stream{:03}", idx),
+            HexViewTarget::AfsEntry(idx) => {
+                let name = workspace
+                    .afs_entries()
+                    .iter()
+                    .find(|e| e.index == *idx)
+                    .map(|e| e.name.as_str())
+                    .unwrap_or("entry");
+                format!("Hex View - {}", name)
+            }
+        };
+        egui::Window::new(&title)
+            .id(egui::Id::new(format!("hex_view_{}", view_idx)))
             .open(&mut open)
-            .default_size([640.0, 400.0])
+            .default_size([700.0, 420.0])
             .resizable(true)
             .show(ctx, |ui| {
-                show_hex_viewer(ui, workspace, stream_index);
+                show_hex_viewer_v2(ui, workspace, hex_state);
             });
         if !open {
-            editors.hex_view = None;
+            hex_views_to_close.push(view_idx);
         }
+    }
+    for idx in hex_views_to_close.into_iter().rev() {
+        editors.hex_views.remove(idx);
     }
 
     if editors.save_planner {
@@ -637,15 +668,75 @@ fn replace_gim_png(
     }
 }
 
-fn show_hex_viewer(ui: &mut egui::Ui, workspace: &ModWorkspace, stream_index: usize) {
-    let Some(data) = get_stream_data(workspace, stream_index) else {
-        ui.label("Stream not available.");
-        return;
+fn show_hex_viewer_v2(
+    ui: &mut egui::Ui,
+    workspace: &ModWorkspace,
+    state: &mut HexViewerState,
+) {
+    if state.cached_data.is_none() {
+        match &state.target {
+            HexViewTarget::Stream(_) => {}
+            HexViewTarget::AfsEntry(index) => {
+                if let Some(afs_path) = workspace.afs_path() {
+                    if let Some(entry) = workspace.afs_entries().iter().find(|e| e.index == *index)
+                    {
+                        match crate::afs::read_entry_from_file(afs_path, entry.offset, entry.size) {
+                            Ok(data) => state.cached_data = Some(data),
+                            Err(e) => {
+                                ui.label(format!("Failed to read entry: {e}"));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let data: &[u8] = match &state.target {
+        HexViewTarget::Stream(index) => match get_stream_data(workspace, *index) {
+            Some(d) => d,
+            None => {
+                ui.label("Stream data not available.");
+                return;
+            }
+        },
+        HexViewTarget::AfsEntry(_) => match &state.cached_data {
+            Some(d) => d.as_slice(),
+            None => {
+                ui.label("Entry data not available.");
+                return;
+            }
+        },
     };
-    ui.label(format!("{} bytes", data.len()));
+
+    ui.label(format!("{} bytes (0x{:X})", data.len(), data.len()));
+
+    if let Some(start) = state.selection_start {
+        let end = state.selection_end.unwrap_or(start);
+        let sel_start = start.min(end);
+        let sel_end = start.max(end);
+        let len = sel_end - sel_start + 1;
+        ui.label(format!(
+            "Selection: 0x{:08X}..0x{:08X} ({} bytes)",
+            sel_start, sel_end, len
+        ));
+    }
     ui.separator();
+
     let row_count = (data.len() + 15) / 16;
     let row_height = 16.0;
+
+    let sel_start = state.selection_start.unwrap_or(usize::MAX);
+    let sel_end = state.selection_end.unwrap_or(sel_start);
+    let sel_lo = sel_start.min(sel_end);
+    let sel_hi = sel_start.max(sel_end);
+
+    let highlight_primary = egui::Color32::from_rgba_premultiplied(70, 130, 180, 80);
+    let highlight_secondary = egui::Color32::from_rgba_premultiplied(70, 130, 180, 40);
+
+    let mut new_selection: Option<(usize, bool)> = None;
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show_rows(ui, row_height, row_count, |ui, range| {
@@ -653,24 +744,78 @@ fn show_hex_viewer(ui: &mut egui::Ui, workspace: &ModWorkspace, stream_index: us
                 let offset = row * 16;
                 let end = (offset + 16).min(data.len());
                 let chunk = &data[offset..end];
-                let hex: String = chunk
-                    .iter()
-                    .map(|b| format!("{b:02X}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let ascii: String = chunk
-                    .iter()
-                    .map(|&b| {
-                        if b.is_ascii_graphic() || b == b' ' {
-                            b as char
+
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("{offset:08X}"));
+                    ui.add_space(8.0);
+
+                    for (group_idx, group_start) in (0..chunk.len()).step_by(4).enumerate() {
+                        if group_idx > 0 {
+                            ui.add_space(4.0);
+                        }
+                        let group_end = (group_start + 4).min(chunk.len());
+                        for byte_idx in group_start..group_end {
+                            let abs_offset = offset + byte_idx;
+                            let byte_val = chunk[byte_idx];
+                            let is_selected =
+                                state.selection_start.is_some() && abs_offset >= sel_lo && abs_offset <= sel_hi;
+                            let label = format!("{:02X}", byte_val);
+                            let text = if is_selected {
+                                egui::RichText::new(label)
+                                    .monospace()
+                                    .background_color(highlight_primary)
+                            } else {
+                                egui::RichText::new(label).monospace()
+                            };
+                            let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+                            if response.clicked() {
+                                new_selection = Some((abs_offset, false));
+                            }
+                            if response.dragged() {
+                                new_selection = Some((abs_offset, true));
+                            }
+                        }
+                    }
+
+                    ui.add_space(12.0);
+
+                    for byte_idx in 0..chunk.len() {
+                        let abs_offset = offset + byte_idx;
+                        let byte_val = chunk[byte_idx];
+                        let ch = if byte_val.is_ascii_graphic() || byte_val == b' ' {
+                            byte_val as char
                         } else {
                             '.'
+                        };
+                        let is_selected =
+                            state.selection_start.is_some() && abs_offset >= sel_lo && abs_offset <= sel_hi;
+                        let text = if is_selected {
+                            egui::RichText::new(ch.to_string())
+                                .monospace()
+                                .background_color(highlight_secondary)
+                        } else {
+                            egui::RichText::new(ch.to_string()).monospace()
+                        };
+                        let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+                        if response.clicked() {
+                            new_selection = Some((abs_offset, false));
                         }
-                    })
-                    .collect();
-                ui.monospace(format!("{offset:08X}: {hex:<48} {ascii}"));
+                        if response.dragged() {
+                            new_selection = Some((abs_offset, true));
+                        }
+                    }
+                });
             }
         });
+
+    if let Some((byte_offset, is_drag)) = new_selection {
+        if is_drag {
+            state.selection_end = Some(byte_offset);
+        } else {
+            state.selection_start = Some(byte_offset);
+            state.selection_end = Some(byte_offset);
+        }
+    }
 }
 
 fn show_save_planner(

@@ -294,7 +294,7 @@ impl GpuRenderer {
         });
 
         let axis_lines = create_axis_lines(device);
-        let grid_lines = create_ground_grid(device);
+        let grid_lines = create_ground_grid(device, 50.0, 5.0);
 
         Self {
             solid_pipeline,
@@ -448,6 +448,10 @@ impl GpuRenderer {
         })
     }
 
+    pub fn update_grid(&mut self, device: &wgpu::Device, extent: f32, step: f32) {
+        self.grid_lines = create_ground_grid(device, extent, step);
+    }
+
     pub fn ensure_viewport(
         &mut self,
         device: &wgpu::Device,
@@ -510,6 +514,71 @@ impl GpuRenderer {
         self.color_view = Some(color_view);
         self.depth_view = Some(depth_view);
         self.egui_texture_id = Some(texture_id);
+    }
+
+    pub fn render_scene_only(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &PreviewCamera,
+    ) -> Option<GpuRenderStats> {
+        let started = std::time::Instant::now();
+        let color_view = self.color_view.as_ref()?;
+        let depth_view = self.depth_view.as_ref()?;
+
+        let [vw, vh] = self.viewport_size;
+        let uniforms = build_uniforms(camera, vw, vh, false);
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("scene_only_render"),
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene_only_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.176,
+                            g: 0.176,
+                            b: 0.176,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.line_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.grid_lines.vertex_buffer.slice(..));
+            pass.draw(0..self.grid_lines.vertex_count, 0..1);
+
+            pass.set_vertex_buffer(0, self.axis_lines.vertex_buffer.slice(..));
+            pass.draw(0..self.axis_lines.vertex_count, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+        let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Some(GpuRenderStats {
+            encode_ms: total_ms,
+            submit_ms: 0.0,
+            total_ms,
+            viewport_size: self.viewport_size,
+        })
     }
 
     pub fn render(
@@ -730,10 +799,26 @@ fn create_axis_lines(device: &wgpu::Device) -> GpuLineMesh {
     }
 }
 
-fn create_ground_grid(device: &wgpu::Device) -> GpuLineMesh {
+pub fn compute_grid_params(bounds: Option<&crate::render::PreviewBounds>) -> (f32, f32) {
+    match bounds {
+        Some(b) => {
+            let max_dim = [
+                (b.max[0] - b.min[0]).abs(),
+                (b.max[1] - b.min[1]).abs(),
+                (b.max[2] - b.min[2]).abs(),
+            ]
+            .into_iter()
+            .fold(0.0_f32, f32::max);
+            let extent = (max_dim * 1.5).max(10.0);
+            let step = (extent / 20.0).max(0.5);
+            (extent, step)
+        }
+        None => (50.0, 5.0),
+    }
+}
+
+fn create_ground_grid(device: &wgpu::Device, extent: f32, step: f32) -> GpuLineMesh {
     let mut verts = Vec::new();
-    let extent = 20.0_f32;
-    let step = 1.0_f32;
     let color_major = [0.25, 0.25, 0.25, 1.0];
     let color_minor = [0.18, 0.18, 0.18, 1.0];
     let n = (extent / step) as i32;

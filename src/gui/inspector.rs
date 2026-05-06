@@ -90,6 +90,16 @@ impl Pmf2SummaryCache {
     }
 }
 
+pub struct InspectorAction {
+    pub rename_entry: Option<(usize, String)>,
+}
+
+impl InspectorAction {
+    fn none() -> Self {
+        Self { rename_entry: None }
+    }
+}
+
 pub fn show_inspector(
     ui: &mut egui::Ui,
     workspace: &ModWorkspace,
@@ -98,7 +108,9 @@ pub fn show_inspector(
     gim_cache: &mut GimPreviewCache,
     pmf2_cache: &mut Pmf2SummaryCache,
     preview_visibility: &mut PreviewVisibility,
-) {
+    entry_name_edit_buf: &mut String,
+) -> InspectorAction {
+    let mut action = InspectorAction::none();
     ui.heading("Inspector");
     ui.separator();
 
@@ -114,7 +126,7 @@ pub fn show_inspector(
                     pmf2_cache,
                     preview_visibility,
                 );
-                return;
+                return action;
             }
         }
     }
@@ -125,17 +137,49 @@ pub fn show_inspector(
             .iter()
             .find(|e| e.index == entry_index)
         {
-            show_entry_inspector(ui, entry);
-            return;
+            show_entry_inspector(ui, entry, entry_name_edit_buf, &mut action);
+            return action;
         }
     }
 
     ui.label("Select an AFS entry or PZZ stream.");
+    action
 }
 
-fn show_entry_inspector(ui: &mut egui::Ui, entry: &crate::workspace::AfsEntryNode) {
-    ui.strong(&entry.name);
+fn show_entry_inspector(
+    ui: &mut egui::Ui,
+    entry: &crate::workspace::AfsEntryNode,
+    name_edit_buf: &mut String,
+    action: &mut InspectorAction,
+) {
+    ui.strong("Entry Info");
     ui.separator();
+
+    ui.horizontal(|ui| {
+        ui.label("Name:");
+        if *name_edit_buf != entry.name && !ui.memory(|m| m.has_focus(egui::Id::new("entry_name_edit"))) {
+            *name_edit_buf = entry.name.clone();
+        }
+        let response = ui.add(
+            egui::TextEdit::singleline(name_edit_buf)
+                .id(egui::Id::new("entry_name_edit"))
+                .desired_width(180.0),
+        );
+        if response.lost_focus() && *name_edit_buf != entry.name {
+            let mut new_name = name_edit_buf.clone();
+            if new_name.len() > 0x20 {
+                let truncate_at = new_name
+                    .char_indices()
+                    .take_while(|(i, _)| *i < 0x20)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+                new_name.truncate(truncate_at);
+            }
+            action.rename_entry = Some((entry.index, new_name));
+        }
+    });
+
     labeled_row(ui, "Index", &format!("{}", entry.index));
     labeled_row(ui, "Offset", &format!("0x{:08X}", entry.offset));
     labeled_row(ui, "Size", &format_size(entry.size));

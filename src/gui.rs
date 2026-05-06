@@ -86,6 +86,7 @@ pub struct GvgModdingApp {
     auto_update_cwcheat_on_save_afs: bool,
     cwcheat_settings_modal_open: bool,
     gui_state_dirty: bool,
+    entry_name_edit_buf: String,
     /// User-dismissable error dialog; same text is mirrored in `status`.
     pending_alert: Option<String>,
     save_afs_job: Option<SaveAfsJob>,
@@ -238,6 +239,7 @@ impl GvgModdingApp {
             auto_update_cwcheat_on_save_afs: persisted.auto_update_cwcheat_on_save_afs,
             cwcheat_settings_modal_open: false,
             gui_state_dirty: false,
+            entry_name_edit_buf: String::new(),
             pending_alert: None,
             save_afs_job: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -279,11 +281,12 @@ impl eframe::App for GvgModdingApp {
         }
 
         if self.show_right_panel {
+            let mut inspector_action = inspector::InspectorAction { rename_entry: None };
             egui::SidePanel::right("inspector")
                 .resizable(true)
                 .default_width(320.0)
                 .show(ctx, |ui| {
-                    inspector::show_inspector(
+                    inspector_action = inspector::show_inspector(
                         ui,
                         &self.workspace,
                         self.tree_state.selected_afs_entry,
@@ -291,8 +294,14 @@ impl eframe::App for GvgModdingApp {
                         &mut self.inspector_gim_cache,
                         &mut self.inspector_pmf2_cache,
                         &mut self.preview_state.visibility,
+                        &mut self.entry_name_edit_buf,
                     );
                 });
+            if let Some((index, new_name)) = inspector_action.rename_entry {
+                if self.workspace.rename_entry(index, new_name.clone()) {
+                    self.status = format!("Renamed entry {} to \"{}\"", index, new_name);
+                }
+            }
         }
 
         self.update_gpu_mesh();
@@ -894,7 +903,41 @@ impl GvgModdingApp {
                 self.editors.gim_preview = Some(index);
             }
             TreeAction::OpenHexView(index) => {
-                self.editors.hex_view = Some(index);
+                let target = editors::HexViewTarget::Stream(index);
+                if !self.editors.hex_views.iter().any(|h| h.target == target) {
+                    self.editors.hex_views.push(editors::HexViewerState {
+                        target,
+                        selection_start: None,
+                        selection_end: None,
+                        cached_data: None,
+                    });
+                }
+            }
+            TreeAction::OpenHexViewEntry(index) => {
+                let target = editors::HexViewTarget::AfsEntry(index);
+                if !self.editors.hex_views.iter().any(|h| h.target == target) {
+                    self.editors.hex_views.push(editors::HexViewerState {
+                        target,
+                        selection_start: None,
+                        selection_end: None,
+                        cached_data: None,
+                    });
+                }
+            }
+            TreeAction::ExportDecryptedPzz(index) => {
+                self.export_decrypted_pzz(index);
+            }
+            TreeAction::ExportPzzStreams(index) => {
+                self.export_pzz_streams(index);
+            }
+            TreeAction::DumpAfsToFolder => {
+                self.dump_afs_to_folder();
+            }
+            TreeAction::AddEntry => {
+                self.status = "Add entry not yet implemented".to_string();
+            }
+            TreeAction::DeleteEntry(_index) => {
+                self.status = "Delete entry not yet implemented".to_string();
             }
         }
     }
@@ -966,6 +1009,190 @@ impl GvgModdingApp {
         match std::fs::write(&path, data) {
             Ok(()) => self.status = format!("Exported: {}", path.display()),
             Err(e) => self.notify_error(format!("Write failed: {e}")),
+        }
+    }
+
+    fn export_decrypted_pzz(&mut self, entry_index: usize) {
+        let Some(afs_path) = self.workspace.afs_path().cloned() else {
+            self.notify_error("No AFS file is open.".to_owned());
+            return;
+        };
+        let Some(entry) = self
+            .workspace
+            .afs_entries()
+            .iter()
+            .find(|e| e.index == entry_index)
+        else {
+            self.notify_error(format!("Entry {} not found", entry_index));
+            return;
+        };
+        let raw = match afs::read_entry_from_file(&afs_path, entry.offset, entry.size) {
+            Ok(d) => d,
+            Err(e) => {
+                self.notify_error(format!("Read failed: {e}"));
+                return;
+            }
+        };
+        let key = match pzz::find_pzz_key(&raw) {
+            Some(k) => k,
+            None => {
+                self.notify_error("Failed to derive PZZ XOR key".to_string());
+                return;
+            }
+        };
+        let decrypted = pzz::xor_decrypt(&raw, key);
+        let file_name = entry.name.clone();
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("PZZ", &["pzz"])
+            .set_file_name(&file_name);
+        if let Some(dir) = &self.last_dir_export_entry_raw {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        touch_dialog_dir_parent(
+            &mut self.last_dir_export_entry_raw,
+            &path,
+            &mut self.gui_state_dirty,
+        );
+        match std::fs::write(&path, &decrypted) {
+            Ok(()) => self.status = format!("Exported decrypted PZZ: {}", path.display()),
+            Err(e) => self.notify_error(format!("Write failed: {e}")),
+        }
+    }
+
+    fn export_pzz_streams(&mut self, entry_index: usize) {
+        let Some(afs_path) = self.workspace.afs_path().cloned() else {
+            self.notify_error("No AFS file is open.".to_owned());
+            return;
+        };
+        let Some(entry) = self
+            .workspace
+            .afs_entries()
+            .iter()
+            .find(|e| e.index == entry_index)
+        else {
+            self.notify_error(format!("Entry {} not found", entry_index));
+            return;
+        };
+        let raw = match afs::read_entry_from_file(&afs_path, entry.offset, entry.size) {
+            Ok(d) => d,
+            Err(e) => {
+                self.notify_error(format!("Read failed: {e}"));
+                return;
+            }
+        };
+        let streams = match pzz::extract_pzz_streams_strict(&raw) {
+            Ok(result) => result.streams,
+            Err(e) => {
+                self.notify_error(format!("PZZ extract failed: {e}"));
+                return;
+            }
+        };
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let mut errors = Vec::new();
+        for (i, data) in streams.iter().enumerate() {
+            let ext = match pzz::classify_stream(data) {
+                "pmf2" => "pmf2",
+                "gim" => "gim",
+                "sad" => "sad",
+                _ => "bin",
+            };
+            let name = format!("stream_{:03}.{}", i, ext);
+            let out_path = folder.join(&name);
+            if let Err(e) = std::fs::write(&out_path, data) {
+                errors.push(format!("stream_{:03}: {e}", i));
+            }
+        }
+        if errors.is_empty() {
+            self.status = format!(
+                "Exported {} streams to {}",
+                streams.len(),
+                folder.display()
+            );
+        } else {
+            self.status = format!(
+                "Exported streams with {} errors: {}",
+                errors.len(),
+                errors.join("; ")
+            );
+        }
+    }
+
+    fn dump_afs_to_folder(&mut self) {
+        let entries = self.workspace.afs_entries().to_vec();
+        if entries.is_empty() {
+            self.notify_error("No AFS entries loaded.".to_owned());
+            return;
+        }
+        let Some(afs_path) = self.workspace.afs_path().cloned() else {
+            self.notify_error("No AFS file is open.".to_owned());
+            return;
+        };
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let mut errors = Vec::new();
+        let mut written = 0usize;
+        let mut used_names = std::collections::HashMap::<String, usize>::new();
+
+        for entry in &entries {
+            if entry.validation != crate::workspace::EntryValidation::Ok {
+                continue;
+            }
+            let base_name = if entry.name.is_empty()
+                || entry.name.starts_with("entry")
+                    && entry.name.chars().skip(5).all(|c| c.is_ascii_digit() || c == '.')
+            {
+                format!("entry_{:03}", entry.index)
+            } else {
+                entry.name.clone()
+            };
+
+            let count = used_names.entry(base_name.clone()).or_insert(0);
+            *count += 1;
+            let file_name = if *count > 1 {
+                if let Some(dot_pos) = base_name.rfind('.') {
+                    format!(
+                        "{}_{}.{}",
+                        &base_name[..dot_pos],
+                        count,
+                        &base_name[dot_pos + 1..]
+                    )
+                } else {
+                    format!("{}_{}", base_name, count)
+                }
+            } else {
+                base_name
+            };
+
+            let out_path = folder.join(&file_name);
+            match afs::read_entry_from_file(&afs_path, entry.offset, entry.size) {
+                Ok(data) => {
+                    if let Err(e) = std::fs::write(&out_path, &data) {
+                        errors.push(format!("{}: {e}", file_name));
+                    } else {
+                        written += 1;
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("{}: read error: {e}", file_name));
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            self.status = format!("Dumped {} entries to {}", written, folder.display());
+        } else {
+            self.status = format!(
+                "Dumped {} entries with {} errors to {}",
+                written,
+                errors.len(),
+                folder.display()
+            );
         }
     }
 
@@ -1381,13 +1608,6 @@ impl GvgModdingApp {
     }
 
     fn show_3d_preview(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let Some(gpu_mesh) = self.gpu_mesh.as_ref() else {
-            ui.centered_and_justified(|ui| {
-                ui.label("Select a PMF2 stream to preview.");
-            });
-            return;
-        };
-
         let rs = match &self.wgpu_state {
             Some(rs) => rs,
             None => {
@@ -1398,14 +1618,29 @@ impl GvgModdingApp {
             }
         };
 
-        preview::preview_controls(ui, gpu_mesh, &mut self.preview_state);
-        let fps = preview_fps(ctx);
-        preview::preview_perf_label(
-            ui,
-            fps,
-            gpu_mesh,
-            self.last_preview_render_stats.map(|s| s.total_ms),
-        );
+        let has_model = self.gpu_mesh.is_some();
+
+        if has_model {
+            let gpu_mesh = self.gpu_mesh.as_ref().unwrap();
+            preview::preview_controls(ui, gpu_mesh, &mut self.preview_state);
+            let fps = preview_fps(ctx);
+            preview::preview_perf_label(
+                ui,
+                fps,
+                gpu_mesh,
+                self.last_preview_render_stats.map(|s| s.total_ms),
+            );
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Reset View").clicked() {
+                    self.preview_state.camera =
+                        Some(crate::render::PreviewCamera::reset_view());
+                }
+                ui.checkbox(&mut self.preview_state.visibility.show_grid, "Grid");
+                ui.checkbox(&mut self.preview_state.visibility.show_axes, "Axes");
+            });
+            ui.label("Select a PMF2 stream to preview a model.");
+        }
 
         let available = ui.available_size();
         let vw = (available.x as u32).max(1);
@@ -1414,12 +1649,7 @@ impl GvgModdingApp {
         let camera = *self
             .preview_state
             .camera
-            .get_or_insert_with(|| {
-                crate::render::PreviewCamera::frame_bounds_with_target(
-                    gpu_mesh.bounds,
-                    gpu_mesh.focus_target,
-                )
-            });
+            .get_or_insert_with(crate::render::PreviewCamera::reset_view);
 
         let (render_stats, texture_id) = {
             let renderer = match &mut self.gpu_renderer {
@@ -1427,16 +1657,22 @@ impl GvgModdingApp {
                 None => return,
             };
             renderer.ensure_viewport(&rs.device, &mut rs.renderer.write(), vw, vh);
-            let render_stats = renderer.render(
-                &rs.device,
-                &rs.queue,
-                &camera,
-                gpu_mesh,
-                self.gpu_texture_bind_group.as_ref(),
-                self.preview_state.wireframe,
-                self.preview_state.visibility.show_axes,
-                self.preview_state.visibility.show_grid,
-            );
+
+            let render_stats = if has_model {
+                let gpu_mesh = self.gpu_mesh.as_ref().unwrap();
+                renderer.render(
+                    &rs.device,
+                    &rs.queue,
+                    &camera,
+                    gpu_mesh,
+                    self.gpu_texture_bind_group.as_ref(),
+                    self.preview_state.wireframe,
+                    self.preview_state.visibility.show_axes,
+                    self.preview_state.visibility.show_grid,
+                )
+            } else {
+                renderer.render_scene_only(&rs.device, &rs.queue, &camera)
+            };
             (render_stats, renderer.egui_texture_id)
         };
         self.last_preview_render_stats = render_stats;
@@ -1455,29 +1691,31 @@ impl GvgModdingApp {
             );
         }
 
-        if response.dragged() {
+        if response.dragged_by(egui::PointerButton::Primary) {
             let delta = ui.input(|input| input.pointer.delta());
             let cam = self
                 .preview_state
                 .camera
-                .get_or_insert_with(|| {
-                    crate::render::PreviewCamera::frame_bounds_with_target(
-                        gpu_mesh.bounds,
-                        gpu_mesh.focus_target,
-                    )
-                });
+                .get_or_insert_with(crate::render::PreviewCamera::reset_view);
             cam.orbit(delta.x * 0.01, -delta.y * 0.01);
+            ctx.request_repaint();
+        }
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            let delta = ui.input(|input| input.pointer.delta());
+            let cam = self
+                .preview_state
+                .camera
+                .get_or_insert_with(crate::render::PreviewCamera::reset_view);
+            cam.pan(-delta.x, delta.y);
             ctx.request_repaint();
         }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
-                let cam = self.preview_state.camera.get_or_insert_with(|| {
-                    crate::render::PreviewCamera::frame_bounds_with_target(
-                        gpu_mesh.bounds,
-                        gpu_mesh.focus_target,
-                    )
-                });
+                let cam = self
+                    .preview_state
+                    .camera
+                    .get_or_insert_with(crate::render::PreviewCamera::reset_view);
                 cam.zoom((-scroll * 0.001).clamp(-0.5, 0.5));
                 ctx.request_repaint();
             }
@@ -1557,6 +1795,14 @@ impl GvgModdingApp {
                     );
                 }
             }
+        }
+
+        if let (Some(gpu_mesh), Some(renderer), Some(rs)) =
+            (&self.gpu_mesh, &mut self.gpu_renderer, &self.wgpu_state)
+        {
+            let (extent, step) =
+                crate::gpu_renderer::compute_grid_params(Some(&gpu_mesh.bounds));
+            renderer.update_grid(&rs.device, extent, step);
         }
 
         self.gpu_mesh_stream_index = Some(stream_index);
