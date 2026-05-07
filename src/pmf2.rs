@@ -191,7 +191,7 @@ impl VtypeInfo {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ParsedVertex {
     pub x: f32,
     pub y: f32,
@@ -201,6 +201,34 @@ pub struct ParsedVertex {
     pub nx: f32,
     pub ny: f32,
     pub nz: f32,
+    /// PSP GU vertex color when present (`col_fmt` 4444 / 8888). RGBA in 0..1 linear-ish floats.
+    pub vertex_color_rgba: Option<[f32; 4]>,
+}
+
+/// PSP GU_COLOR_8888 word layout (little-endian u32): bytes are B,G,R,A255 from low to high byte.
+fn unpack_psp_vertex_color8888(word: u32) -> [f32; 4] {
+    let b = (word & 0xFF) as f32 / 255.0;
+    let g = ((word >> 8) & 0xFF) as f32 / 255.0;
+    let r = ((word >> 16) & 0xFF) as f32 / 255.0;
+    let a = ((word >> 24) & 0xFF) as f32 / 255.0;
+    [r, g, b, a]
+}
+
+fn pack_psp_vertex_color8888(rgba: [f32; 4]) -> u32 {
+    let r = (rgba[0].clamp(0.0, 1.0) * 255.0).round() as u32 & 0xFF;
+    let g = (rgba[1].clamp(0.0, 1.0) * 255.0).round() as u32 & 0xFF;
+    let b = (rgba[2].clamp(0.0, 1.0) * 255.0).round() as u32 & 0xFF;
+    let a = (rgba[3].clamp(0.0, 1.0) * 255.0).round() as u32 & 0xFF;
+    b | (g << 8) | (r << 16) | (a << 24)
+}
+
+/// PSP GU_COLOR_4444 (common transparency path): nibbles low→high as R,G,B,A (4 bits each).
+fn unpack_psp_vertex_color4444(h: u16) -> [f32; 4] {
+    let r = ((h >> 0) & 0xF) as f32 / 15.0;
+    let g = ((h >> 4) & 0xF) as f32 / 15.0;
+    let b = ((h >> 8) & 0xF) as f32 / 15.0;
+    let a = ((h >> 12) & 0xF) as f32 / 15.0;
+    [r, g, b, a]
 }
 
 fn decode_vertex(data: &[u8], offset: usize, vt: &VtypeInfo) -> Option<ParsedVertex> {
@@ -246,7 +274,17 @@ fn decode_vertex(data: &[u8], offset: usize, vt: &VtypeInfo) -> Option<ParsedVer
             _ => 0,
         };
         if cb > 0 {
-            o = align(o, cb) + cb;
+            o = align(o, cb);
+            match vt.col_fmt {
+                7 => {
+                    pv.vertex_color_rgba = Some(unpack_psp_vertex_color8888(ru32(data, o)));
+                }
+                6 => {
+                    pv.vertex_color_rgba = Some(unpack_psp_vertex_color4444(ru16(data, o)));
+                }
+                _ => {}
+            }
+            o += cb;
         }
     }
     if vt.nrm_fmt > 0 {
@@ -624,6 +662,9 @@ pub struct BoneMeshMeta {
     pub face_count: usize,
     pub has_uv: bool,
     pub has_normals: bool,
+    /// When present (same length as `local_vertices`), written back as PSP GU_COLOR_8888 display-list verts.
+    #[serde(default)]
+    pub vertex_colors_rgba: Option<Vec<[f32; 4]>>,
     pub draw_call_vtypes: Vec<u32>,
     pub local_vertices: Vec<[f32; 8]>,
     pub faces: Vec<[usize; 3]>,
@@ -637,6 +678,7 @@ pub struct BoneMeshData {
     pub local_vertices: Vec<ParsedVertex>,
     pub has_uv: bool,
     pub has_normals: bool,
+    pub has_vertex_color: bool,
     pub vtypes: Vec<u32>,
 }
 
@@ -794,6 +836,7 @@ pub fn extract_per_bone_meshes(pmf2_data: &[u8], swap_yz: bool) -> ExtractedPmf2
                     nx: tnx,
                     ny: tny,
                     nz: tnz,
+                    vertex_color_rgba: pv.vertex_color_rgba,
                 };
                 if swap_yz {
                     let (ox, oy, oz) = (tv.x, tv.y, tv.z);
@@ -822,6 +865,7 @@ pub fn extract_per_bone_meshes(pmf2_data: &[u8], swap_yz: bool) -> ExtractedPmf2
         }
 
         if !part_verts.is_empty() && !part_faces.is_empty() {
+            let has_vertex_color = local_verts.iter().any(|v| v.vertex_color_rgba.is_some());
             bone_meshes.push(BoneMeshData {
                 bone_index: sec.index,
                 bone_name: sec.name.clone(),
@@ -830,6 +874,7 @@ pub fn extract_per_bone_meshes(pmf2_data: &[u8], swap_yz: bool) -> ExtractedPmf2
                 local_vertices: local_verts,
                 has_uv,
                 has_normals: has_nrm,
+                has_vertex_color,
                 vtypes: vtypes_used,
             });
         }
@@ -926,6 +971,16 @@ pub fn build_meta(
                 .map(|lv| [lv.x, lv.y, lv.z, lv.u, lv.v, lv.nx, lv.ny, lv.nz])
                 .collect();
             let fs: Vec<[usize; 3]> = bm.faces.iter().map(|&(a, b, c)| [a, b, c]).collect();
+            let vertex_colors_rgba = if bm.has_vertex_color {
+                Some(
+                    bm.local_vertices
+                        .iter()
+                        .map(|v| v.vertex_color_rgba.unwrap_or([1.0, 1.0, 1.0, 1.0]))
+                        .collect(),
+                )
+            } else {
+                None
+            };
             BoneMeshMeta {
                 bone_index: bm.bone_index,
                 bone_name: bm.bone_name.clone(),
@@ -933,6 +988,7 @@ pub fn build_meta(
                 face_count: bm.faces.len(),
                 has_uv: bm.has_uv,
                 has_normals: bm.has_normals,
+                vertex_colors_rgba,
                 draw_call_vtypes: bm.vtypes.clone(),
                 local_vertices: lvs,
                 faces: fs,
@@ -960,7 +1016,26 @@ fn wrap_texture_coord(value: f32) -> f32 {
     }
 }
 
-type EncodedVertex = (i16, i16, i16, i16, i16, i16, i16, i16);
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct EncodedVertex {
+    tu: i16,
+    tv: i16,
+    rgba8888: Option<u32>,
+    nnx: i16,
+    nny: i16,
+    nnz: i16,
+    px: i16,
+    py: i16,
+    pz: i16,
+}
+
+fn mesh_has_vertex_color8888(mesh: &BoneMeshMeta) -> bool {
+    mesh.vertex_colors_rgba
+        .as_ref()
+        .map(|c| c.len() == mesh.local_vertices.len())
+        .unwrap_or(false)
+}
+
 const MAX_TRIANGLE_PRIM_VERTICES: usize = 0xFFFC;
 #[cfg(test)]
 const APPENDED_TRIANGLE_PRIM_VERTICES: usize = 96;
@@ -1000,9 +1075,11 @@ fn encode_vertices_i16(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<EncodedVerte
     let sx = bbox[0] / 32768.0;
     let sy = bbox[1] / 32768.0;
     let sz = bbox[2] / 32768.0;
+    let has_vc = mesh_has_vertex_color8888(mesh);
     mesh.local_vertices
         .iter()
-        .map(|lv| {
+        .enumerate()
+        .map(|(idx, lv)| {
             let px = if sx > 0.0 {
                 clamp_i16((lv[0] / sx).round() as i32)
             } else {
@@ -1023,26 +1100,50 @@ fn encode_vertices_i16(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<EncodedVerte
             let nnx = clamp_i16((lv[5] * 32767.0).round() as i32);
             let nny = clamp_i16((lv[6] * 32767.0).round() as i32);
             let nnz = clamp_i16((lv[7] * 32767.0).round() as i32);
-            (tu, tv, nnx, nny, nnz, px, py, pz)
+            let rgba8888 = if has_vc {
+                Some(pack_psp_vertex_color8888(mesh.vertex_colors_rgba.as_ref().unwrap()[idx]))
+            } else {
+                None
+            };
+            EncodedVertex {
+                tu,
+                tv,
+                rgba8888,
+                nnx,
+                nny,
+                nnz,
+                px,
+                py,
+                pz,
+            }
         })
         .collect()
 }
 
-fn serialize_vertex_buf(verts: &[EncodedVertex], has_uv: bool, has_normals: bool) -> Vec<u8> {
+fn serialize_vertex_buf(
+    verts: &[EncodedVertex],
+    has_uv: bool,
+    has_vertex_color: bool,
+    has_normals: bool,
+) -> Vec<u8> {
+    let opaque = pack_psp_vertex_color8888([1.0, 1.0, 1.0, 1.0]);
     let mut buf = Vec::new();
     for vtx in verts {
         if has_uv {
-            buf.extend_from_slice(&vtx.0.to_le_bytes());
-            buf.extend_from_slice(&vtx.1.to_le_bytes());
+            buf.extend_from_slice(&vtx.tu.to_le_bytes());
+            buf.extend_from_slice(&vtx.tv.to_le_bytes());
+        }
+        if has_vertex_color {
+            buf.extend_from_slice(&vtx.rgba8888.unwrap_or(opaque).to_le_bytes());
         }
         if has_normals {
-            buf.extend_from_slice(&vtx.2.to_le_bytes());
-            buf.extend_from_slice(&vtx.3.to_le_bytes());
-            buf.extend_from_slice(&vtx.4.to_le_bytes());
+            buf.extend_from_slice(&vtx.nnx.to_le_bytes());
+            buf.extend_from_slice(&vtx.nny.to_le_bytes());
+            buf.extend_from_slice(&vtx.nnz.to_le_bytes());
         }
-        buf.extend_from_slice(&vtx.5.to_le_bytes());
-        buf.extend_from_slice(&vtx.6.to_le_bytes());
-        buf.extend_from_slice(&vtx.7.to_le_bytes());
+        buf.extend_from_slice(&vtx.px.to_le_bytes());
+        buf.extend_from_slice(&vtx.py.to_le_bytes());
+        buf.extend_from_slice(&vtx.pz.to_le_bytes());
     }
     while buf.len() % 4 != 0 {
         buf.push(0);
@@ -1068,11 +1169,16 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
     if mesh.has_uv {
         vtype |= 2;
     }
+    if mesh_has_vertex_color8888(mesh) {
+        vtype |= 7 << 2;
+    }
     if mesh.has_normals {
         vtype |= 2 << 5;
     }
     vtype |= 2 << 7;
     vtype |= 2 << 11;
+
+    let has_vertex_color = mesh_has_vertex_color8888(mesh);
 
     let push_cmd = |buf: &mut Vec<u8>, cmd: u8, param: u32| {
         let word = ((cmd as u32) << 24) | (param & 0xFFFFFF);
@@ -1103,7 +1209,8 @@ fn build_ge_commands(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Vec<u8> {
             indices.push(uidx);
         }
 
-        let vert_buf = serialize_vertex_buf(&unique_verts, mesh.has_uv, mesh.has_normals);
+        let vert_buf =
+            serialize_vertex_buf(&unique_verts, mesh.has_uv, has_vertex_color, mesh.has_normals);
         let mut idx_buf = Vec::new();
         for &idx in &indices {
             idx_buf.extend_from_slice(&idx.to_le_bytes());
@@ -1153,6 +1260,7 @@ fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshM
 
     let mut remap: HashMap<usize, usize> = HashMap::new();
     let mut local_vertices = Vec::new();
+    let mut vertex_colors_rgba: Option<Vec<[f32; 4]>> = None;
     let mut faces = Vec::new();
     for face in &mesh.faces[face_start..] {
         let mut out_face = [0usize; 3];
@@ -1163,6 +1271,12 @@ fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshM
             let next_idx = remap.len();
             let mapped = *remap.entry(src_idx).or_insert_with(|| {
                 local_vertices.push(mesh.local_vertices[src_idx]);
+                if mesh_has_vertex_color8888(mesh) {
+                    let vc = mesh.vertex_colors_rgba.as_ref().unwrap();
+                    vertex_colors_rgba
+                        .get_or_insert_with(Vec::new)
+                        .push(vc[src_idx]);
+                }
                 next_idx
             });
             *dst = mapped;
@@ -1177,6 +1291,7 @@ fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshM
         face_count: faces.len(),
         has_uv: mesh.has_uv,
         has_normals: mesh.has_normals,
+        vertex_colors_rgba,
         draw_call_vtypes: Vec::new(),
         local_vertices,
         faces,
@@ -1185,38 +1300,7 @@ fn build_mesh_suffix(mesh: &BoneMeshMeta, face_start: usize) -> Option<BoneMeshM
 
 #[cfg(test)]
 fn encode_mesh_vertices(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Option<(u32, Vec<u8>, usize)> {
-    let sx = bbox[0] / 32768.0;
-    let sy = bbox[1] / 32768.0;
-    let sz = bbox[2] / 32768.0;
-
-    let verts_i16: Vec<EncodedVertex> = mesh
-        .local_vertices
-        .iter()
-        .map(|lv| {
-            let px = if sx > 0.0 {
-                clamp_i16((lv[0] / sx).round() as i32)
-            } else {
-                0
-            };
-            let py = if sy > 0.0 {
-                clamp_i16((lv[1] / sy).round() as i32)
-            } else {
-                0
-            };
-            let pz = if sz > 0.0 {
-                clamp_i16((lv[2] / sz).round() as i32)
-            } else {
-                0
-            };
-            let tu = clamp_i16((wrap_texture_coord(lv[3]) * 32768.0).round() as i32);
-            let tv = clamp_i16((wrap_texture_coord(lv[4]) * 32768.0).round() as i32);
-            let nnx = clamp_i16((lv[5] * 32767.0).round() as i32);
-            let nny = clamp_i16((lv[6] * 32767.0).round() as i32);
-            let nnz = clamp_i16((lv[7] * 32767.0).round() as i32);
-            (tu, tv, nnx, nny, nnz, px, py, pz)
-        })
-        .collect();
-
+    let verts_i16 = encode_vertices_i16(mesh, bbox);
     let mut seq_verts = Vec::new();
     for f in &mesh.faces {
         for &idx in &[f[0], f[1], f[2]] {
@@ -1233,29 +1317,16 @@ fn encode_mesh_vertices(mesh: &BoneMeshMeta, bbox: &[f32; 3]) -> Option<(u32, Ve
     if mesh.has_uv {
         vtype |= 2;
     }
+    if mesh_has_vertex_color8888(mesh) {
+        vtype |= 7 << 2;
+    }
     if mesh.has_normals {
         vtype |= 2 << 5;
     }
     vtype |= 2 << 7;
 
-    let mut vert_buf = Vec::new();
-    for vtx in &seq_verts {
-        if mesh.has_uv {
-            vert_buf.extend_from_slice(&vtx.0.to_le_bytes());
-            vert_buf.extend_from_slice(&vtx.1.to_le_bytes());
-        }
-        if mesh.has_normals {
-            vert_buf.extend_from_slice(&vtx.2.to_le_bytes());
-            vert_buf.extend_from_slice(&vtx.3.to_le_bytes());
-            vert_buf.extend_from_slice(&vtx.4.to_le_bytes());
-        }
-        vert_buf.extend_from_slice(&vtx.5.to_le_bytes());
-        vert_buf.extend_from_slice(&vtx.6.to_le_bytes());
-        vert_buf.extend_from_slice(&vtx.7.to_le_bytes());
-    }
-    while vert_buf.len() % 4 != 0 {
-        vert_buf.push(0);
-    }
+    let has_vc = mesh_has_vertex_color8888(mesh);
+    let vert_buf = serialize_vertex_buf(&seq_verts, mesh.has_uv, has_vc, mesh.has_normals);
 
     Some((vtype, vert_buf, seq_verts.len()))
 }
@@ -1833,6 +1904,7 @@ mod tests {
             face_count,
             has_uv: true,
             has_normals: true,
+            vertex_colors_rgba: None,
             draw_call_vtypes: Vec::new(),
             local_vertices,
             faces,
@@ -2398,6 +2470,7 @@ mod tests {
             face_count,
             has_uv: true,
             has_normals: true,
+            vertex_colors_rgba: None,
             draw_call_vtypes: Vec::new(),
             local_vertices,
             faces,
@@ -2847,6 +2920,7 @@ mod tests {
                 face_count: 1,
                 has_uv: false,
                 has_normals: false,
+                vertex_colors_rgba: None,
                 draw_call_vtypes: Vec::new(),
                 local_vertices: vec![
                     [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -2899,6 +2973,7 @@ mod tests {
                 face_count: 1,
                 has_uv: false,
                 has_normals: false,
+                vertex_colors_rgba: None,
                 draw_call_vtypes: Vec::new(),
                 local_vertices: vec![
                     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],

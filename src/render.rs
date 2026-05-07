@@ -144,12 +144,13 @@ impl PreviewCamera {
         ];
         let radius = length(extent).max(1.0) * 0.5;
         let fov_y_radians = 45.0_f32.to_radians();
+        let fit_distance = (radius / (fov_y_radians * 0.5).tan()).max(2.0);
         Self {
             target,
-            // Default to a front-facing, slightly top-down view.
+            // Default to a front-facing, slightly top-down view; pitch less negative = look more upward.
             yaw: std::f32::consts::PI + 0.35,
             pitch: -0.28,
-            distance: (radius / (fov_y_radians * 0.5).tan()).max(2.0),
+            distance: fit_distance * 1.22,
             fov_y_radians,
             near: 0.01,
             far: 100_000.0,
@@ -179,7 +180,7 @@ impl PreviewCamera {
             target: [0.0, 0.0, 0.0],
             yaw: std::f32::consts::PI + 0.35,
             pitch: -0.28,
-            distance: 50.0,
+            distance: 70.0,
             fov_y_radians,
             near: 0.01,
             far: 100_000.0,

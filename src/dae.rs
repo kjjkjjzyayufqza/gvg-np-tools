@@ -9,6 +9,46 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
 
+/// Collada material symbol bound on `<triangles material="…">` and `<instance_material symbol="…">`.
+/// Using an explicit Lambert here avoids Maya assigning OpenPBR on import (which FBX export does not support).
+const PMF2_DAE_MATERIAL_SYMBOL: &str = "PMF2_DefaultMat";
+const PMF2_DAE_EFFECT_ID: &str = "pmf2_default-effect";
+const PMF2_DAE_MATERIAL_ID: &str = "pmf2_default-material";
+
+fn append_pmf2_default_material_libraries(xml: &mut String) {
+    xml.push_str("  <library_effects>\n");
+    xml.push_str("    <effect id=\"");
+    xml.push_str(PMF2_DAE_EFFECT_ID);
+    xml.push_str("\" name=\"pmf2_default\">\n");
+    xml.push_str("      <profile_COMMON>\n");
+    xml.push_str("        <technique sid=\"common\">\n");
+    xml.push_str("          <lambert>\n");
+    xml.push_str("            <diffuse>\n");
+    xml.push_str("              <color sid=\"diffuse\">1 1 1 1</color>\n");
+    xml.push_str("            </diffuse>\n");
+    xml.push_str("          </lambert>\n");
+    xml.push_str("        </technique>\n");
+    xml.push_str("      </profile_COMMON>\n");
+    xml.push_str("    </effect>\n");
+    xml.push_str("  </library_effects>\n");
+    xml.push_str("  <library_materials>\n");
+    xml.push_str("    <material id=\"");
+    xml.push_str(PMF2_DAE_MATERIAL_ID);
+    xml.push_str("\" name=\"pmf2_default\">\n");
+    xml.push_str("      <instance_effect url=\"#");
+    xml.push_str(PMF2_DAE_EFFECT_ID);
+    xml.push_str("\"/>\n");
+    xml.push_str("    </material>\n");
+    xml.push_str("  </library_materials>\n");
+}
+
+/// Bound on every mesh instance so importers assign Collada Lambert instead of a default OpenPBR-style shader.
+const PMF2_DAE_BIND_MATERIAL_XML: &str = concat!(
+    "<bind_material><technique_common>",
+    "<instance_material symbol=\"", "PMF2_DefaultMat", "\" target=\"#", "pmf2_default-material", "\"/>",
+    "</technique_common></bind_material>"
+);
+
 pub fn write_dae(
     path: &Path,
     bone_meshes: &[BoneMeshData],
@@ -29,6 +69,7 @@ pub fn write_dae(
         "<COLLADA xmlns=\"http://www.collada.org/2005/11/COLLADASchema\" version=\"1.4.1\">\n",
     );
     xml.push_str("  <asset><up_axis>Y_UP</up_axis></asset>\n");
+    append_pmf2_default_material_libraries(&mut xml);
     xml.push_str("  <library_geometries>\n");
 
     let mut mesh_nodes = Vec::new();
@@ -82,14 +123,27 @@ pub fn write_dae(
         }
         let normals = recompute_vertex_normals(&positions, &indices);
 
+        let vertex_colors_export: Option<Vec<[f32; 4]>> = if mesh.has_vertex_color {
+            Some(
+                src_verts
+                    .iter()
+                    .map(|v| v.vertex_color_rgba.unwrap_or([1.0, 1.0, 1.0, 1.0]))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
         write_geometry(
             &mut xml,
             &geom_id,
             &geom_name,
             &positions,
             Some(&normals),
+            vertex_colors_export.as_deref(),
             if mesh.has_uv { Some(&uvs) } else { None },
             &indices,
+            PMF2_DAE_MATERIAL_SYMBOL,
         );
 
         let mut node = String::new();
@@ -118,12 +172,17 @@ pub fn write_dae(
             ));
             write!(
                 &mut node,
-                "<instance_controller url=\"#{}\"><skeleton>#{}</skeleton></instance_controller>",
-                controller_id, joint_node_id
+                "<instance_controller url=\"#{}\"><skeleton>#{}</skeleton>{}</instance_controller>",
+                controller_id, joint_node_id, PMF2_DAE_BIND_MATERIAL_XML
             )
             .unwrap();
         } else {
-            write!(&mut node, "<instance_geometry url=\"#{}\"/>", geom_id).unwrap();
+            write!(
+                &mut node,
+                "<instance_geometry url=\"#{}\">{}</instance_geometry>",
+                geom_id, PMF2_DAE_BIND_MATERIAL_XML
+            )
+            .unwrap();
         }
         node.push_str("</node>");
         mesh_nodes.push(node);
@@ -194,11 +253,14 @@ fn write_geometry(
     geom_name: &str,
     positions: &[f64],
     normals: Option<&[f64]>,
+    vertex_colors: Option<&[[f32; 4]]>,
     uvs: Option<&[f64]>,
     indices: &[usize],
+    material_symbol: &str,
 ) {
     let vertex_count = positions.len() / 3;
     let triangle_count = indices.len() / 3;
+    debug_assert!(vertex_colors.map(|c| c.len()).unwrap_or(vertex_count) == vertex_count);
 
     xml.push_str("    <geometry id=\"");
     xml.push_str(geom_id);
@@ -243,6 +305,34 @@ fn write_geometry(
         xml.push_str("        </source>\n");
     }
 
+    if let Some(colors) = vertex_colors {
+        xml.push_str("        <source id=\"");
+        xml.push_str(geom_id);
+        xml.push_str("-colors\">\n");
+        xml.push_str("          <float_array id=\"");
+        xml.push_str(geom_id);
+        xml.push_str("-colors-array\" count=\"");
+        write!(xml, "{}", colors.len() * 4).unwrap();
+        xml.push_str("\">");
+        let mut first = true;
+        for c in colors {
+            for comp in c {
+                if !first {
+                    xml.push(' ');
+                }
+                first = false;
+                write!(xml, "{:.6}", *comp as f64).unwrap();
+            }
+        }
+        xml.push_str("</float_array>\n");
+        xml.push_str("          <technique_common><accessor source=\"#");
+        xml.push_str(geom_id);
+        xml.push_str("-colors-array\" count=\"");
+        write!(xml, "{}", colors.len()).unwrap();
+        xml.push_str("\" stride=\"4\"><param name=\"R\" type=\"float\"/><param name=\"G\" type=\"float\"/><param name=\"B\" type=\"float\"/><param name=\"A\" type=\"float\"/></accessor></technique_common>\n");
+        xml.push_str("        </source>\n");
+    }
+
     if let Some(uvs) = uvs {
         xml.push_str("        <source id=\"");
         xml.push_str(geom_id);
@@ -269,6 +359,8 @@ fn write_geometry(
     xml.push_str("-positions\"/></vertices>\n");
     xml.push_str("        <triangles count=\"");
     write!(xml, "{}", triangle_count).unwrap();
+    xml.push_str("\" material=\"");
+    xml.push_str(material_symbol);
     xml.push_str("\">\n");
     xml.push_str("          <input semantic=\"VERTEX\" source=\"#");
     xml.push_str(geom_id);
@@ -283,6 +375,14 @@ fn write_geometry(
         xml.push_str("\"/>\n");
         next_offset += 1;
     }
+    if vertex_colors.is_some() {
+        xml.push_str("          <input semantic=\"COLOR\" source=\"#");
+        xml.push_str(geom_id);
+        xml.push_str("-colors\" offset=\"");
+        write!(xml, "{}", next_offset).unwrap();
+        xml.push_str("\" set=\"0\"/>\n");
+        next_offset += 1;
+    }
     if uvs.is_some() {
         xml.push_str("          <input semantic=\"TEXCOORD\" source=\"#");
         xml.push_str(geom_id);
@@ -292,7 +392,13 @@ fn write_geometry(
     }
 
     xml.push_str("          <p>");
-    append_triangle_indices(xml, indices, normals.is_some(), uvs.is_some());
+    append_triangle_indices(
+        xml,
+        indices,
+        normals.is_some(),
+        vertex_colors.is_some(),
+        uvs.is_some(),
+    );
     xml.push_str("</p>\n");
     xml.push_str("        </triangles>\n");
     xml.push_str("      </mesh>\n");
@@ -326,7 +432,13 @@ fn append_matrix_for_collada(out: &mut String, m_row_major: &[f64; 16]) {
     append_f64_list(out, &col);
 }
 
-fn append_triangle_indices(out: &mut String, indices: &[usize], has_normals: bool, has_uv: bool) {
+fn append_triangle_indices(
+    out: &mut String,
+    indices: &[usize],
+    has_normals: bool,
+    has_color: bool,
+    has_uv: bool,
+) {
     let mut first = true;
     for idx in indices {
         if !first {
@@ -335,6 +447,10 @@ fn append_triangle_indices(out: &mut String, indices: &[usize], has_normals: boo
         first = false;
         write!(out, "{}", idx).unwrap();
         if has_normals {
+            out.push(' ');
+            write!(out, "{}", idx).unwrap();
+        }
+        if has_color {
             out.push(' ');
             write!(out, "{}", idx).unwrap();
         }
@@ -710,6 +826,8 @@ struct GeometryData {
     id: String,
     name: String,
     vertices: Vec<[f32; 8]>,
+    /// Parallel to `vertices` when vertex COLOR was present in Collada (RGBA 0..1).
+    vertex_colors_rgba: Option<Vec<[f32; 4]>>,
     faces: Vec<[usize; 3]>,
     has_uv: bool,
     has_normals: bool,
@@ -875,6 +993,7 @@ fn parse_dae_to_meta_text_with_uv_flip(
                 face_count: 0,
                 has_uv: geom.has_uv,
                 has_normals: geom.has_normals,
+                vertex_colors_rgba: None,
                 draw_call_vtypes: Vec::new(),
                 local_vertices: Vec::new(),
                 faces: Vec::new(),
@@ -883,6 +1002,27 @@ fn parse_dae_to_meta_text_with_uv_flip(
         entry.has_normals |= geom.has_normals;
         let base = entry.local_vertices.len();
         entry.local_vertices.extend(local_vertices);
+        let n_new = entry.local_vertices.len() - base;
+        match (&mut entry.vertex_colors_rgba, &geom.vertex_colors_rgba) {
+            (acc_opt, Some(gc)) => {
+                let acc = acc_opt.get_or_insert_with(Vec::new);
+                if acc.len() < base {
+                    acc.resize(base, [1.0, 1.0, 1.0, 1.0]);
+                }
+                if gc.len() == n_new {
+                    acc.extend_from_slice(gc);
+                } else {
+                    acc.extend(std::iter::repeat([1.0, 1.0, 1.0, 1.0]).take(n_new));
+                }
+            }
+            (Some(acc), None) if n_new > 0 => {
+                if acc.len() < base {
+                    acc.resize(base, [1.0, 1.0, 1.0, 1.0]);
+                }
+                acc.extend(std::iter::repeat([1.0, 1.0, 1.0, 1.0]).take(n_new));
+            }
+            _ => {}
+        }
         for face in &geom.faces {
             entry
                 .faces
@@ -897,6 +1037,11 @@ fn parse_dae_to_meta_text_with_uv_flip(
     for bm in &mut bone_meshes {
         bm.vertex_count = bm.local_vertices.len();
         bm.face_count = bm.faces.len();
+        if let Some(c) = &bm.vertex_colors_rgba {
+            if c.len() != bm.local_vertices.len() {
+                bm.vertex_colors_rgba = None;
+            }
+        }
     }
 
     let bbox = compute_auto_bbox_from_bone_meshes(&bone_meshes).unwrap_or([1.0, 1.0, 1.0]);
@@ -944,6 +1089,7 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
         let mut vertices_to_position: HashMap<String, String> = HashMap::new();
         let mut vertices_to_normal: HashMap<String, String> = HashMap::new();
         let mut vertices_to_uv: HashMap<String, String> = HashMap::new();
+        let mut vertices_to_color: HashMap<String, String> = HashMap::new();
         for vertices_node in mesh
             .children()
             .filter(|n| n.is_element() && n.tag_name().name() == "vertices")
@@ -969,16 +1115,27 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
                     "TEXCOORD" => {
                         vertices_to_uv.insert(vertices_id.to_string(), trim_hash(src).to_string());
                     }
+                    "COLOR" => {
+                        vertices_to_color
+                            .insert(vertices_id.to_string(), trim_hash(src).to_string());
+                    }
                     _ => {}
                 }
             }
         }
 
-        let mut vertex_map: HashMap<(usize, usize, usize), usize> = HashMap::new();
+        let mut vertex_map: HashMap<(usize, usize, usize, usize), usize> = HashMap::new();
         let mut vertices = Vec::<[f32; 8]>::new();
+        let mut vertex_colors: Option<Vec<[f32; 4]>> = None;
         let mut faces = Vec::<[usize; 3]>::new();
         let mut has_uv = false;
         let mut has_normals = false;
+
+        fn ensure_parallel_vertex_colors(colors: &mut Option<Vec<[f32; 4]>>, verts: usize, tri_colors: bool) {
+            if tri_colors && colors.is_none() {
+                *colors = Some(vec![[1.0, 1.0, 1.0, 1.0]; verts]);
+            }
+        }
 
         for tri in mesh
             .children()
@@ -988,6 +1145,8 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
             let mut position_input: Option<(String, usize)> = None;
             let mut normal_input: Option<(String, usize)> = None;
             let mut uv_input: Option<(String, usize)> = None;
+            let mut color_tri_input: Option<(String, usize)> = None;
+            let mut vertex_sid: Option<String> = None;
             for input in tri
                 .children()
                 .filter(|n| n.is_element() && n.tag_name().name() == "input")
@@ -1001,6 +1160,7 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
                 max_offset = max_offset.max(offset);
                 match semantic {
                     "VERTEX" => {
+                        vertex_sid = Some(source.to_string());
                         let resolved = vertices_to_position
                             .get(source)
                             .cloned()
@@ -1028,12 +1188,22 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
                             uv_input = Some((source.to_string(), offset));
                         }
                     }
+                    "COLOR" => {
+                        color_tri_input = Some((source.to_string(), offset));
+                    }
                     _ => {}
                 }
             }
             let Some((position_source, pos_offset)) = position_input else {
                 continue;
             };
+            let color_via_vertices = vertex_sid
+                .as_ref()
+                .and_then(|sid| vertices_to_color.get(sid).cloned());
+
+            let tri_has_color =
+                color_tri_input.is_some() || color_via_vertices.is_some();
+
             let stride = max_offset + 1;
             if stride == 0 {
                 continue;
@@ -1053,6 +1223,8 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
             has_uv |= uv_input.is_some();
 
             let mut corner_indices = Vec::with_capacity(p_values.len() / stride);
+            ensure_parallel_vertex_colors(&mut vertex_colors, vertices.len(), tri_has_color);
+
             for chunk in p_values.chunks(stride) {
                 let pos_index = chunk[pos_offset];
                 let normal_index = normal_input
@@ -1063,7 +1235,14 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
                     .as_ref()
                     .map(|(_, off)| chunk[*off])
                     .unwrap_or(usize::MAX);
-                let key = (pos_index, normal_index, uv_index);
+                let color_index = if let Some((_, off)) = &color_tri_input {
+                    chunk[*off]
+                } else if color_via_vertices.is_some() {
+                    chunk[pos_offset]
+                } else {
+                    usize::MAX
+                };
+                let key = (pos_index, normal_index, uv_index, color_index);
                 let idx = if let Some(existing) = vertex_map.get(&key) {
                     *existing
                 } else {
@@ -1078,8 +1257,24 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
                     } else {
                         [0.0, 0.0]
                     };
+                    let rgba = if tri_has_color {
+                        let maybe_src = color_tri_input
+                            .as_ref()
+                            .map(|(s, _)| s.as_str())
+                            .or_else(|| color_via_vertices.as_ref().map(|s| s.as_str()));
+                        if let Some(src) = maybe_src {
+                            read_source_vec4(&sources, src, color_index)
+                        } else {
+                            [1.0, 1.0, 1.0, 1.0]
+                        }
+                    } else {
+                        [1.0, 1.0, 1.0, 1.0]
+                    };
                     let new_idx = vertices.len();
                     vertices.push([p[0], p[1], p[2], uv[0], uv[1], n[0], n[1], n[2]]);
+                    if let Some(vc) = vertex_colors.as_mut() {
+                        vc.push(rgba);
+                    }
                     vertex_map.insert(key, new_idx);
                     new_idx
                 };
@@ -1093,12 +1288,20 @@ fn parse_geometries(doc: &Document<'_>) -> Result<BTreeMap<String, GeometryData>
         }
 
         if !vertices.is_empty() && !faces.is_empty() {
+            let vertex_colors_rgba = vertex_colors.and_then(|c| {
+                if c.len() == vertices.len() {
+                    Some(c)
+                } else {
+                    None
+                }
+            });
             out.insert(
                 geom_id.clone(),
                 GeometryData {
                     id: geom_id,
                     name: geom_name,
                     vertices,
+                    vertex_colors_rgba,
                     faces,
                     has_uv,
                     has_normals,
@@ -1630,6 +1833,29 @@ fn read_source_vec3(
     [x, y, z]
 }
 
+fn read_source_vec4(
+    sources: &HashMap<String, SourceData>,
+    source_id: &str,
+    index: usize,
+) -> [f32; 4] {
+    let Some(source) = sources.get(source_id) else {
+        return [1.0, 1.0, 1.0, 1.0];
+    };
+    if source.values.is_empty() {
+        return [1.0, 1.0, 1.0, 1.0];
+    }
+    let stride = source.stride.max(1);
+    let start = index.saturating_mul(stride);
+    if start >= source.values.len() {
+        return [1.0, 1.0, 1.0, 1.0];
+    }
+    let r = source.values.get(start).copied().unwrap_or(1.0);
+    let g = source.values.get(start + 1).copied().unwrap_or(1.0);
+    let b = source.values.get(start + 2).copied().unwrap_or(1.0);
+    let a = source.values.get(start + 3).copied().unwrap_or(1.0);
+    [r, g, b, a]
+}
+
 fn read_source_vec2(
     sources: &HashMap<String, SourceData>,
     source_id: &str,
@@ -1789,6 +2015,7 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
                 ParsedVertex {
                     x: 1.0,
@@ -1799,6 +2026,7 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
                 ParsedVertex {
                     x: 0.0,
@@ -1809,6 +2037,7 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
             ],
             faces: vec![(0, 1, 2)],
@@ -1822,6 +2051,7 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
                 ParsedVertex {
                     x: 1.0,
@@ -1832,6 +2062,7 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
                 ParsedVertex {
                     x: 0.0,
@@ -1842,10 +2073,12 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
             ],
             has_uv,
             has_normals,
+            has_vertex_color: false,
             vtypes: Vec::new(),
         }
     }
@@ -1884,6 +2117,9 @@ mod tests {
         assert!(text.contains("type=\"JOINT\""));
         assert!(text.contains("<library_controllers>"));
         assert!(text.contains("<instance_controller"));
+        assert!(text.contains("bind_material"));
+        assert!(text.contains("<library_materials>"));
+        assert!(text.contains("PMF2_DefaultMat"));
         assert!(text.contains("<vertex_weights"));
         assert!(!text.contains("id=\"tree\""));
         assert!(!text.contains("id=\"bone_list\""));

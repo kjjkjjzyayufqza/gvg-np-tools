@@ -725,6 +725,7 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
                 ParsedVertex {
                     x: 1.0,
@@ -735,6 +736,7 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
                 ParsedVertex {
                     x: 0.0,
@@ -745,12 +747,14 @@ mod tests {
                     nx: 0.0,
                     ny: 1.0,
                     nz: 0.0,
+                    vertex_color_rgba: None,
                 },
             ],
             faces: vec![(0, 1, 2)],
             local_vertices: Vec::new(),
             has_uv: true,
             has_normals: true,
+            has_vertex_color: false,
             vtypes: Vec::new(),
         }];
         let sections = vec![BoneSection {

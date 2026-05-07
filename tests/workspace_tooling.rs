@@ -343,6 +343,7 @@ fn pmf2_preview_from_extracted_mesh_uses_world_vertices() {
         ],
         has_uv: false,
         has_normals: false,
+        has_vertex_color: false,
         vtypes: Vec::new(),
     }];
     let preview = Pmf2PreviewMesh::from_bone_meshes(&meshes).unwrap();
