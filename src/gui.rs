@@ -87,6 +87,9 @@ pub struct GvgModdingApp {
     cwcheat_settings_modal_open: bool,
     gui_state_dirty: bool,
     entry_name_edit_buf: String,
+    /// Solid fill behind the inspector GIM texture preview (`Transparent` ignores this). Default: neutral gray (210,210,210).
+    gim_inspector_preview_bg: egui::Color32,
+    gim_inspector_preview_bg_transparent: bool,
     /// User-dismissable error dialog; same text is mirrored in `status`.
     pending_alert: Option<String>,
     save_afs_job: Option<SaveAfsJob>,
@@ -240,6 +243,8 @@ impl GvgModdingApp {
             cwcheat_settings_modal_open: false,
             gui_state_dirty: false,
             entry_name_edit_buf: String::new(),
+            gim_inspector_preview_bg: egui::Color32::from_rgb(210, 210, 210),
+            gim_inspector_preview_bg_transparent: false,
             pending_alert: None,
             save_afs_job: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -295,6 +300,8 @@ impl eframe::App for GvgModdingApp {
                         &mut self.inspector_pmf2_cache,
                         &mut self.preview_state.visibility,
                         &mut self.entry_name_edit_buf,
+                        &mut self.gim_inspector_preview_bg,
+                        &mut self.gim_inspector_preview_bg_transparent,
                     );
                 });
             if let Some((index, new_name)) = inspector_action.rename_entry {

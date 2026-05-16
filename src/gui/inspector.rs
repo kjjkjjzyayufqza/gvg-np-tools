@@ -109,6 +109,8 @@ pub fn show_inspector(
     pmf2_cache: &mut Pmf2SummaryCache,
     preview_visibility: &mut PreviewVisibility,
     entry_name_edit_buf: &mut String,
+    gim_preview_bg: &mut egui::Color32,
+    gim_preview_bg_transparent: &mut bool,
 ) -> InspectorAction {
     let mut action = InspectorAction::none();
     ui.heading("Inspector");
@@ -125,6 +127,8 @@ pub fn show_inspector(
                     gim_cache,
                     pmf2_cache,
                     preview_visibility,
+                    gim_preview_bg,
+                    gim_preview_bg_transparent,
                 );
                 return action;
             }
@@ -201,6 +205,8 @@ fn show_stream_inspector(
     gim_cache: &mut GimPreviewCache,
     pmf2_cache: &mut Pmf2SummaryCache,
     preview_visibility: &mut PreviewVisibility,
+    gim_preview_bg: &mut egui::Color32,
+    gim_preview_bg_transparent: &mut bool,
 ) {
     ui.strong(&stream.name);
     ui.separator();
@@ -222,7 +228,15 @@ fn show_stream_inspector(
             pmf2_cache,
             preview_visibility,
         ),
-        AssetKind::Gim => show_gim_summary(ui, stream.index, pzz_revision, data, gim_cache),
+        AssetKind::Gim => show_gim_summary(
+            ui,
+            stream.index,
+            pzz_revision,
+            data,
+            gim_cache,
+            gim_preview_bg,
+            gim_preview_bg_transparent,
+        ),
         _ => show_raw_summary(ui, data),
     }
 }
@@ -366,6 +380,8 @@ fn show_gim_summary(
     pzz_revision: u64,
     data: &[u8],
     cache: &mut GimPreviewCache,
+    preview_bg: &mut egui::Color32,
+    preview_bg_transparent: &mut bool,
 ) {
     ui.strong("GIM Summary");
     let key = GimPreviewCacheKey {
@@ -389,6 +405,15 @@ fn show_gim_summary(
             });
             ui.separator();
 
+            ui.horizontal(|ui| {
+                ui.label("Preview background:");
+                ui.checkbox(preview_bg_transparent, "Transparent");
+                if !*preview_bg_transparent {
+                    ui.color_edit_button_srgba(preview_bg);
+                }
+            });
+            ui.separator();
+
             let available = ui.available_size();
             if available.x <= 1.0 || available.y <= 1.0 {
                 ui.label("Inspector area too small for GIM preview.");
@@ -398,10 +423,18 @@ fn show_gim_summary(
             if let Some(texture) =
                 cache.texture_handle(ui.ctx(), format!("inspector_gim_full_{}", stream_index))
             {
-                ui.add_sized(
-                    available,
-                    egui::Image::new((texture.id(), texture.size_vec2())).fit_to_exact_size(available),
-                );
+                let fill = if *preview_bg_transparent {
+                    egui::Color32::TRANSPARENT
+                } else {
+                    *preview_bg
+                };
+                egui::Frame::NONE.fill(fill).show(ui, |ui| {
+                    ui.add_sized(
+                        available,
+                        egui::Image::new((texture.id(), texture.size_vec2()))
+                            .fit_to_exact_size(available),
+                    );
+                });
             } else {
                 ui.label("GIM texture error: preview cache is empty.");
             }
